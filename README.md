@@ -77,6 +77,38 @@ QMD exposes an MCP (Model Context Protocol) server for integration with Claude, 
 
 **Resources:** Documents are readable via `qmd://` URIs (e.g. `qmd://collection/path/to/file.md`).
 
+**Shared HTTP server (one process, many clients)**
+
+`qmd mcp` defaults to stdio — one child process per client. With `--http` it serves
+several named indexes over MCP streamable HTTP, so a single process can back every
+agent on the machine:
+
+```bash
+qmd mcp --http --addr 127.0.0.1:8422     # config: ~/.config/qmd/server.yml
+```
+
+`server.yml` maps URL paths to named indexes and gates access with bearer keys:
+
+```yaml
+servers:
+  /mcp: index              # conventional endpoint (same index as /mcp/shared)
+  /mcp/shared: index       # project notes, docs
+  /mcp/personal: personal  # private index
+
+auth:
+  public: [/mcp, /mcp/shared]   # reachable without a key
+  groups:
+    personal:
+      keys: ["<token>"]         # generate: openssl rand -hex 24
+      allow: [/mcp/personal, /mcp, /mcp/shared]
+```
+
+No key reaches public paths only; a valid key reaches the paths its group allows.
+Unknown paths return 404, denied requests 401 (`WWW-Authenticate: Bearer`). Keys are
+compared in constant time and logged only as `sha256:<8>`. `GET /healthz` reports
+liveness. Point any streamable-HTTP MCP client at
+`http://127.0.0.1:8422/mcp`; add `Authorization: Bearer <token>` for private indexes.
+
 **Claude Desktop** (`~/Library/Application Support/Claude/claude_desktop_config.json`):
 
 ```json
@@ -116,7 +148,7 @@ Or configure MCP manually in `~/.claude/settings.json`:
 - **Embeddings** – Stored in SQLite; generated via Ollama, any OpenAI-compatible API, or local GGUF (purego, no CGO)
 - **Hybrid search** – `query` combines BM25 and vector results using Reciprocal Rank Fusion (RRF)
 - **Chunking** – 800 tokens per chunk, 15% overlap (character-based in Go)
-- **Index** – `~/.cache/qmd/index.sqlite` (or `INDEX_PATH`)
+- **Index** – `db_path` in `~/.config/qmd/<index>.yml`, else `QMD_DB_DIR/<index>.sqlite`, else `INDEX_PATH`, else `~/.cache/qmd/index.sqlite`
 
 ```
 Query ──┬──► BM25 (FTS5) ──► Ranked list

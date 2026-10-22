@@ -41,7 +41,7 @@ func getIndexName() string {
 }
 
 func getStorePath() (string, error) {
-	return store.GetDefaultDbPath(getIndexName())
+	return config.DBPathFor(getIndexName())
 }
 
 func openStore() (*store.Store, error) {

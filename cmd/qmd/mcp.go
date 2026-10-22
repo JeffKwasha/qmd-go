@@ -80,26 +80,42 @@ You can also access documents directly via the ` + "`qmd://`" + ` URI scheme:
 
 var mcpCmd = &cobra.Command{
 	Use:   "mcp",
-	Short: "Run MCP server (stdio)",
-	Long:  "Start the Model Context Protocol server for QMD. Exposes search, get, and document resources over stdio.",
+	Short: "Run MCP server (stdio or streamable HTTP)",
+	Long:  "Start the Model Context Protocol server for QMD. Exposes search, get, and document resources. Defaults to stdio; with --http it serves multiple named indexes over MCP streamable HTTP, gated by bearer keys defined in the auth config.",
 	RunE:  runMCPServer,
 }
 
 func init() {
+	mcpCmd.Flags().Bool("http", false, "Serve over MCP streamable HTTP instead of stdio")
+	mcpCmd.Flags().String("addr", "127.0.0.1:8422", "HTTP listen address (with --http)")
+	mcpCmd.Flags().String("server-config", "", "Server config YAML (with --http; default ~/.config/qmd/server.yml)")
 	rootCmd.AddCommand(mcpCmd)
 }
 
 func runMCPServer(cmd *cobra.Command, args []string) error {
+	if httpMode, _ := cmd.Flags().GetBool("http"); httpMode {
+		addr, _ := cmd.Flags().GetString("addr")
+		serverCfg, _ := cmd.Flags().GetString("server-config")
+		return runMCPHTTP(addr, serverCfg)
+	}
+
 	initRoot()
 	s, err := openStore()
 	if err != nil {
 		return err
 	}
 	defer s.Close()
+	cfg, _ := config.LoadConfig()
+	return newServer(s, cfg).Run(context.Background(), &mcp.StdioTransport{})
+}
 
+// newServer builds the MCP server (tools, resources, prompts) bound to one
+// store. cfg is the collection config of that store's index and is only used
+// for path-context annotations; nil is safe.
+func newServer(s *store.Store, cfg *config.Config) *mcp.Server {
 	server := mcp.NewServer(&mcp.Implementation{Name: "qmd", Version: "1.0.0"}, nil)
 
-	server.AddResourceTemplate(&mcp.ResourceTemplate{URITemplate: "qmd://{+path}"}, resourceHandler(s))
+	server.AddResourceTemplate(&mcp.ResourceTemplate{URITemplate: "qmd://{+path}"}, resourceHandler(s, cfg))
 	server.AddPrompt(&mcp.Prompt{
 		Name:        "query",
 		Description: "How to effectively search your knowledge base with QMD",
@@ -113,19 +129,19 @@ func runMCPServer(cmd *cobra.Command, args []string) error {
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "search",
 		Description: "Fast keyword-based full-text search using BM25. Best for finding documents with specific words or phrases.",
-	}, searchTool(s))
+	}, searchTool(s, cfg))
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "vsearch",
 		Description: "Semantic similarity search using vector embeddings. Requires embeddings (run 'qmd embed' first).",
-	}, vsearchTool(s))
+	}, vsearchTool(s, cfg))
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "query",
 		Description: "Hybrid search combining BM25 and vector search with RRF. Best quality when embeddings exist.",
-	}, queryTool(s))
+	}, queryTool(s, cfg))
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "get",
 		Description: "Retrieve the full content of a document by its file path or docid (#abc123).",
-	}, getTool(s))
+	}, getTool(s, cfg))
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "multi_get",
 		Description: "Retrieve multiple documents by glob pattern or comma-separated list. Skips files larger than maxBytes.",
@@ -135,10 +151,10 @@ func runMCPServer(cmd *cobra.Command, args []string) error {
 		Description: "Show the status of the QMD index: collections and document counts.",
 	}, statusTool(s))
 
-	return server.Run(context.Background(), &mcp.StdioTransport{})
+	return server
 }
 
-func resourceHandler(s *store.Store) mcp.ResourceHandler {
+func resourceHandler(s *store.Store, cfg *config.Config) mcp.ResourceHandler {
 	return func(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
 		uri := req.Params.URI
 		if !strings.HasPrefix(uri, "qmd://") {
@@ -170,7 +186,6 @@ func resourceHandler(s *store.Store) mcp.ResourceHandler {
 		if err != nil || body == "" {
 			return nil, mcp.ResourceNotFoundError(uri)
 		}
-		cfg, _ := config.LoadConfig()
 		if cfg != nil {
 			if ctxText := config.FindContextForPath(cfg, collection, path); ctxText != "" {
 				body = "<!-- Context: " + ctxText + " -->\n\n" + body
@@ -184,13 +199,13 @@ func resourceHandler(s *store.Store) mcp.ResourceHandler {
 }
 
 type searchArgs struct {
-	Query      string  `json:"query" jsonschema:"required,description=Search query - keywords or phrases to find"`
-	Limit      int     `json:"limit" jsonschema:"description=Maximum number of results (default 10)"`
-	MinScore   float64 `json:"minScore" jsonschema:"description=Minimum relevance score 0-1 (default 0)"`
-	Collection string  `json:"collection" jsonschema:"description=Filter to a specific collection by name"`
+	Query      string  `json:"query" jsonschema:"Search query - keywords or phrases to find"`
+	Limit      int     `json:"limit,omitempty" jsonschema:"Maximum number of results (default 10)"`
+	MinScore   float64 `json:"minScore,omitempty" jsonschema:"Minimum relevance score 0-1 (default 0)"`
+	Collection string  `json:"collection,omitempty" jsonschema:"Filter to a specific collection by name"`
 }
 
-func searchTool(s *store.Store) func(context.Context, *mcp.CallToolRequest, searchArgs) (*mcp.CallToolResult, any, error) {
+func searchTool(s *store.Store, cfg *config.Config) func(context.Context, *mcp.CallToolRequest, searchArgs) (*mcp.CallToolResult, any, error) {
 	return func(ctx context.Context, req *mcp.CallToolRequest, args searchArgs) (*mcp.CallToolResult, any, error) {
 		limit := args.Limit
 		if limit <= 0 {
@@ -214,7 +229,7 @@ func searchTool(s *store.Store) func(context.Context, *mcp.CallToolRequest, sear
 		for i, r := range filtered {
 			structured[i] = map[string]any{
 				"docid": "#" + docid(r.Hash), "file": r.DisplayPath, "title": r.Title,
-				"score": roundScore(r.Score), "context": getContextForFile(s, r.Filepath), "snippet": snippet(r.Body, args.Query, 300),
+				"score": roundScore(r.Score), "context": getContextForFile(cfg, r.Filepath), "snippet": snippet(r.Body, args.Query, 300),
 			}
 		}
 		return &mcp.CallToolResult{
@@ -225,13 +240,13 @@ func searchTool(s *store.Store) func(context.Context, *mcp.CallToolRequest, sear
 }
 
 type vsearchArgs struct {
-	Query      string  `json:"query" jsonschema:"required,description=Natural language query"`
-	Limit      int     `json:"limit" jsonschema:"description=Maximum number of results (default 10)"`
-	MinScore   float64 `json:"minScore" jsonschema:"description=Minimum relevance score 0-1 (default 0.3)"`
-	Collection string  `json:"collection" jsonschema:"description=Filter to a specific collection"`
+	Query      string  `json:"query" jsonschema:"Natural language query"`
+	Limit      int     `json:"limit,omitempty" jsonschema:"Maximum number of results (default 10)"`
+	MinScore   float64 `json:"minScore,omitempty" jsonschema:"Minimum relevance score 0-1 (default 0.3)"`
+	Collection string  `json:"collection,omitempty" jsonschema:"Filter to a specific collection"`
 }
 
-func vsearchTool(s *store.Store) func(context.Context, *mcp.CallToolRequest, vsearchArgs) (*mcp.CallToolResult, any, error) {
+func vsearchTool(s *store.Store, cfg *config.Config) func(context.Context, *mcp.CallToolRequest, vsearchArgs) (*mcp.CallToolResult, any, error) {
 	return func(ctx context.Context, req *mcp.CallToolRequest, args vsearchArgs) (*mcp.CallToolResult, any, error) {
 		var hasVec int
 		_ = s.DB.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='embedding_blobs'`).Scan(&hasVec)
@@ -276,7 +291,7 @@ func vsearchTool(s *store.Store) func(context.Context, *mcp.CallToolRequest, vse
 		for i, r := range filtered {
 			structured[i] = map[string]any{
 				"docid": "#" + docid(r.Hash), "file": r.DisplayPath, "title": r.Title,
-				"score": roundScore(r.Score), "context": getContextForFile(s, r.Filepath), "snippet": snippet(r.Body, args.Query, 300),
+				"score": roundScore(r.Score), "context": getContextForFile(cfg, r.Filepath), "snippet": snippet(r.Body, args.Query, 300),
 			}
 		}
 		return &mcp.CallToolResult{
@@ -287,13 +302,13 @@ func vsearchTool(s *store.Store) func(context.Context, *mcp.CallToolRequest, vse
 }
 
 type queryArgs struct {
-	Query      string  `json:"query" jsonschema:"required,description=Natural language query"`
-	Limit      int     `json:"limit" jsonschema:"description=Maximum number of results (default 10)"`
-	MinScore   float64 `json:"minScore" jsonschema:"description=Minimum relevance score 0-1"`
-	Collection string  `json:"collection" jsonschema:"description=Filter to a specific collection"`
+	Query      string  `json:"query" jsonschema:"Natural language query"`
+	Limit      int     `json:"limit,omitempty" jsonschema:"Maximum number of results (default 10)"`
+	MinScore   float64 `json:"minScore,omitempty" jsonschema:"Minimum relevance score 0-1"`
+	Collection string  `json:"collection,omitempty" jsonschema:"Filter to a specific collection"`
 }
 
-func queryTool(s *store.Store) func(context.Context, *mcp.CallToolRequest, queryArgs) (*mcp.CallToolResult, any, error) {
+func queryTool(s *store.Store, cfg *config.Config) func(context.Context, *mcp.CallToolRequest, queryArgs) (*mcp.CallToolResult, any, error) {
 	return func(ctx context.Context, req *mcp.CallToolRequest, args queryArgs) (*mcp.CallToolResult, any, error) {
 		limit := args.Limit
 		if limit <= 0 {
@@ -336,7 +351,7 @@ func queryTool(s *store.Store) func(context.Context, *mcp.CallToolRequest, query
 		for i, r := range filtered {
 			structured[i] = map[string]any{
 				"docid": "#" + docid(r.Hash), "file": r.DisplayPath, "title": r.Title,
-				"score": roundScore(r.Score), "context": getContextForFile(s, r.Filepath), "snippet": snippet(r.Body, args.Query, 300),
+				"score": roundScore(r.Score), "context": getContextForFile(cfg, r.Filepath), "snippet": snippet(r.Body, args.Query, 300),
 			}
 		}
 		return &mcp.CallToolResult{
@@ -347,13 +362,13 @@ func queryTool(s *store.Store) func(context.Context, *mcp.CallToolRequest, query
 }
 
 type getArgs struct {
-	File        string `json:"file" jsonschema:"required,description=File path or docid (e.g. pages/meeting.md or #abc123)"`
-	FromLine    int    `json:"fromLine" jsonschema:"description=Start from this line number (1-indexed)"`
-	MaxLines    int    `json:"maxLines" jsonschema:"description=Maximum number of lines to return"`
-	LineNumbers bool   `json:"lineNumbers" jsonschema:"description=Add line numbers to output"`
+	File        string `json:"file" jsonschema:"File path or docid (e.g. pages/meeting.md or #abc123)"`
+	FromLine    int    `json:"fromLine,omitempty" jsonschema:"Start from this line number (1-indexed)"`
+	MaxLines    int    `json:"maxLines,omitempty" jsonschema:"Maximum number of lines to return"`
+	LineNumbers bool   `json:"lineNumbers,omitempty" jsonschema:"Add line numbers to output"`
 }
 
-func getTool(s *store.Store) func(context.Context, *mcp.CallToolRequest, getArgs) (*mcp.CallToolResult, any, error) {
+func getTool(s *store.Store, cfg *config.Config) func(context.Context, *mcp.CallToolRequest, getArgs) (*mcp.CallToolResult, any, error) {
 	return func(ctx context.Context, req *mcp.CallToolRequest, args getArgs) (*mcp.CallToolResult, any, error) {
 		input := args.File
 		fromLine := args.FromLine
@@ -378,7 +393,6 @@ func getTool(s *store.Store) func(context.Context, *mcp.CallToolRequest, getArgs
 				IsError: true,
 			}, nil, nil
 		}
-		cfg, _ := config.LoadConfig()
 		if cfg != nil {
 			if ctxText := config.FindContextForPath(cfg, collection, path); ctxText != "" {
 				body = "<!-- Context: " + ctxText + " -->\n\n" + body
@@ -398,10 +412,10 @@ func getTool(s *store.Store) func(context.Context, *mcp.CallToolRequest, getArgs
 }
 
 type multiGetArgs struct {
-	Pattern     string `json:"pattern" jsonschema:"required,description=Glob pattern or comma-separated list of paths"`
-	MaxLines    int    `json:"maxLines" jsonschema:"description=Maximum lines per file"`
-	MaxBytes    int    `json:"maxBytes" jsonschema:"description=Skip files larger than this (default 10240)"`
-	LineNumbers bool   `json:"lineNumbers" jsonschema:"description=Add line numbers"`
+	Pattern     string `json:"pattern" jsonschema:"Glob pattern or comma-separated list of paths"`
+	MaxLines    int    `json:"maxLines,omitempty" jsonschema:"Maximum lines per file"`
+	MaxBytes    int    `json:"maxBytes,omitempty" jsonschema:"Skip files larger than this (default 10240)"`
+	LineNumbers bool   `json:"lineNumbers,omitempty" jsonschema:"Add line numbers"`
 }
 
 func multiGetTool(s *store.Store) func(context.Context, *mcp.CallToolRequest, multiGetArgs) (*mcp.CallToolResult, any, error) {
@@ -475,12 +489,11 @@ func statusTool(s *store.Store) func(context.Context, *mcp.CallToolRequest, stru
 	}
 }
 
-func getContextForFile(s *store.Store, filepath string) string {
+func getContextForFile(cfg *config.Config, filepath string) string {
 	col, path := parseVirtualPath(filepath)
 	if col == "" {
 		return ""
 	}
-	cfg, _ := config.LoadConfig()
 	if cfg == nil {
 		return ""
 	}

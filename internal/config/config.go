@@ -42,7 +42,25 @@ func LoadConfig() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	return loadConfigFile(path)
+}
 
+// LoadConfigFor loads the collection config for a named index without
+// consulting or mutating the package-level CurrentIndexName. It is used by
+// long-running processes (e.g. an MCP server exposing several indexes at once)
+// where the global would be wrong for all but one index.
+func LoadConfigFor(indexName string) (*Config, error) {
+	dir, err := GetConfigDir()
+	if err != nil {
+		return nil, err
+	}
+	if indexName == "" {
+		indexName = "index"
+	}
+	return loadConfigFile(filepath.Join(dir, indexName+".yml"))
+}
+
+func loadConfigFile(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		return &Config{Collections: make(map[string]Collection)}, nil
@@ -59,6 +77,43 @@ func LoadConfig() (*Config, error) {
 		cfg.Collections = make(map[string]Collection)
 	}
 	return &cfg, nil
+}
+
+// DBPathFor resolves the SQLite file for a named index. Precedence:
+//  1. db_path in that index's config file  (explicit, per index — CLI and server agree)
+//  2. QMD_DB_DIR env                       (shared directory for services/tests)
+//  3. INDEX_PATH env                       (legacy single-index override)
+//  4. $XDG_CACHE_HOME/qmd/<index>.sqlite
+func DBPathFor(indexName string) (string, error) {
+	if indexName == "" {
+		indexName = "index"
+	}
+	if cfg, err := LoadConfigFor(indexName); err == nil && cfg.DBPath != "" {
+		return cfg.DBPath, nil
+	}
+	if dir := os.Getenv("QMD_DB_DIR"); dir != "" {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return "", err
+		}
+		return filepath.Join(dir, indexName+".sqlite"), nil
+	}
+	if path := os.Getenv("INDEX_PATH"); path != "" {
+		return path, nil
+	}
+
+	cacheDir := os.Getenv("XDG_CACHE_HOME")
+	if cacheDir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		cacheDir = filepath.Join(home, ".cache")
+	}
+	qmdCacheDir := filepath.Join(cacheDir, "qmd")
+	if err := os.MkdirAll(qmdCacheDir, 0755); err != nil {
+		return "", err
+	}
+	return filepath.Join(qmdCacheDir, indexName+".sqlite"), nil
 }
 
 func SaveConfig(cfg *Config) error {
