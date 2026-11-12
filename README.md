@@ -84,10 +84,10 @@ several named indexes over MCP streamable HTTP, so a single process can back eve
 agent on the machine:
 
 ```bash
-qmd mcp --http --addr 127.0.0.1:8422     # config: ~/.config/qmd/server.yml
+qmd mcp --http --addr 127.0.0.1:8422     # config: ~/.config/qmd/0_qmd_server.yml
 ```
 
-`server.yml` maps URL paths to named indexes and gates access with bearer keys:
+`0_qmd_server.yml` maps URL paths to named indexes and gates access with bearer keys:
 
 ```yaml
 servers:

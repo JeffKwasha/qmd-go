@@ -4,7 +4,7 @@ package main
 //
 // One process serves several named indexes, each mounted at its own URL path,
 // and gates access with bearer keys described in the server config
-// (~/.config/qmd/server.yml):
+// (~/.config/qmd/0_qmd_server.yml):
 //
 //	servers:
 //	  /mcp: index             # conventional bare endpoint (alias of shared)
@@ -394,6 +394,39 @@ func loadServerConfig(path string) (*serverConfig, error) {
 	return parseServerConfig(data, path)
 }
 
+// validateMountIndexes holds the config against the filesystem: every mount
+// must name an index whose <name>.yml exists. It runs where the mounts decide
+// something — server startup and `server check` — and not in the loader, so the
+// CLI can still edit a config it would refuse to serve.
+//
+// A mount to a missing index is not an empty index. DBPathFor would invent a
+// database path and NewStore would create a fresh database there, so the mount
+// would answer from an index that can never hold a document while the index it
+// was meant to expose sits elsewhere. The server refuses to start instead.
+func validateMountIndexes(sc *serverConfig, path string) error {
+	dir, err := config.GetConfigDir()
+	if err != nil {
+		return err
+	}
+	mounts := make([]string, 0, len(sc.Servers))
+	for p := range sc.Servers {
+		mounts = append(mounts, p)
+	}
+	sort.Strings(mounts)
+	for _, p := range mounts {
+		name := sc.Servers[p]
+		if name == "" {
+			name = "index"
+		}
+		cfgPath := filepath.Join(dir, name+".yml")
+		if _, err := os.Stat(cfgPath); err != nil {
+			return fmt.Errorf("server config %s: mount %s points at index %q, which has no config at %s",
+				path, p, name, cfgPath)
+		}
+	}
+	return nil
+}
+
 // resolveServerConfigPath resolves the server config: the explicit flag, then
 // $QMD_SERVER_CONFIG, then the config dir. The env var lets a service pin the
 // file without repeating a flag in every command.
@@ -620,7 +653,9 @@ func runMCPHTTP(addr, serverCfgPath string) error {
 	if err != nil {
 		return err
 	}
-
+	if err := validateMountIndexes(sc, resolved); err != nil {
+		return err
+	}
 	paths := make([]string, 0, len(sc.Servers))
 	for p := range sc.Servers {
 		paths = append(paths, p)

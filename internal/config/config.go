@@ -13,8 +13,15 @@ import (
 var CurrentIndexName = "index"
 
 // ServerConfigName is the file in the config dir holding mounts and auth. It is
-// not an index config, so index discovery skips it.
-const ServerConfigName = "server.yml"
+// not an index config, so index discovery skips it. The digit prefix is what
+// puts it first in a directory listing: `_` is ignored by collation and sorts
+// with the following letter, so `_qmd_server.yml` would land among the indexes.
+const ServerConfigName = "0_qmd_server.yml"
+
+// legacyServerConfigName is the name this file had before the digit prefix. A
+// copy left behind would be walked as an index named "server", so discovery
+// recognises its content and asks for the rename.
+const legacyServerConfigName = "server.yml"
 
 func GetConfigDir() (string, error) {
 	if dir := os.Getenv("QMD_CONFIG_DIR"); dir != "" {
@@ -51,6 +58,7 @@ func IndexNames() ([]string, error) {
 		return nil, err
 	}
 	reserved := strings.TrimSuffix(ServerConfigName, ".yml")
+	legacy := strings.TrimSuffix(legacyServerConfigName, ".yml")
 	names := make([]string, 0, len(entries))
 	for _, e := range entries {
 		name := e.Name()
@@ -61,10 +69,30 @@ func IndexNames() ([]string, error) {
 		if name == reserved {
 			continue
 		}
+		if name == legacy && holdsServerConfig(filepath.Join(dir, e.Name())) {
+			return nil, fmt.Errorf("%s holds mounts and keys under the old name; rename it to %s",
+				filepath.Join(dir, legacyServerConfigName), filepath.Join(dir, ServerConfigName))
+		}
 		names = append(names, name)
 	}
 	sort.Strings(names)
 	return names, nil
+}
+
+// holdsServerConfig reports whether a file is a server config rather than an
+// index config. Presence of the `servers` key decides, so an index legitimately
+// named "server" (a `collections` key) is still an index.
+func holdsServerConfig(path string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	var top map[string]any
+	if err := yaml.Unmarshal(data, &top); err != nil {
+		return false
+	}
+	_, ok := top["servers"]
+	return ok
 }
 
 func EnsureConfigDir() error {

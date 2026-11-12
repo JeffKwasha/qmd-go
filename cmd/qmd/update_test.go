@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ba0f3/qmd-go/internal/config"
 	"github.com/ba0f3/qmd-go/internal/store"
 )
 
@@ -24,7 +25,7 @@ func writeIndexConfigs(t *testing.T, names ...string) string {
 
 func TestIndexTargetsWithoutIndexWalksEveryIndex(t *testing.T) {
 	dir := writeIndexConfigs(t, "personal", "index", "work")
-	if err := os.WriteFile(filepath.Join(dir, "server.yml"), []byte("servers: {}\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, config.ServerConfigName), []byte("servers: {}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	got, err := indexTargets(false, "")
@@ -63,11 +64,11 @@ func TestIndexTargetsMissingIndexNamesPath(t *testing.T) {
 
 func TestIndexTargetsRejectsServerConfigAsIndex(t *testing.T) {
 	dir := writeIndexConfigs(t, "index")
-	if err := os.WriteFile(filepath.Join(dir, "server.yml"), []byte("servers: {}\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, config.ServerConfigName), []byte("servers: {}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	_, err := indexTargets(true, "server")
-	if err == nil || !strings.Contains(err.Error(), "server.yml") {
+	_, err := indexTargets(true, strings.TrimSuffix(config.ServerConfigName, ".yml"))
+	if err == nil || !strings.Contains(err.Error(), config.ServerConfigName) {
 		t.Fatalf("want server-config error, got %v", err)
 	}
 }
@@ -101,7 +102,7 @@ func TestResolveServerConfigPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := filepath.Join(dir, "server.yml"); got != want {
+	if want := filepath.Join(dir, config.ServerConfigName); got != want {
 		t.Errorf("default = %q, want %q", got, want)
 	}
 

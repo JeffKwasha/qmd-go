@@ -5,21 +5,27 @@ mounted at its own URL path, and bearer keys decide which paths a client may
 reach.
 
 ```
-qmd mcp --http --addr 127.0.0.1:8422 --server-config ~/.config/qmd/server.yml
+qmd mcp --http --addr 127.0.0.1:8422 --server-config ~/.config/qmd/0_qmd_server.yml
 ```
 
 The server config is resolved from `--server-config`, then `$QMD_SERVER_CONFIG`,
-then `$QMD_CONFIG_DIR/server.yml`, then `~/.config/qmd/server.yml`. A service
-should set one of the first two, because a default that follows `$HOME` silently
-points somewhere else when the unit changes account or scope. The same
-resolution applies to `qmd server key` and `qmd server check`.
+then `$QMD_CONFIG_DIR/0_qmd_server.yml`, then
+`~/.config/qmd/0_qmd_server.yml`. A service should set one of the first two,
+because a default that follows `$HOME` silently points somewhere else when the
+unit changes account or scope. The same resolution applies to `qmd server key`
+and `qmd server check`.
 
 Two files matter, and they are separate on purpose:
 
 | File | Holds | Read by |
 |---|---|---|
 | `~/.config/qmd/<index>.yml` | Collections: name, path, glob, context | CLI and server |
-| `~/.config/qmd/server.yml` | Mounts (URL path to index), groups, keys | Server only |
+| `~/.config/qmd/0_qmd_server.yml` | Mounts (URL path to index), groups, keys | Server only |
+
+The server file carries a digit prefix so a directory listing puts it first;
+collation ignores `_`, so `_qmd_server.yml` would sort among the indexes. Index
+discovery skips it by name, and refuses a server config left under the old name
+`server.yml` rather than walking it as an index called `server`.
 
 ## Model
 
@@ -33,7 +39,11 @@ Two files matter, and they are separate on purpose:
   once; a path the router would rewrite before dispatch (a `.` or `..` segment,
   a doubled slash between segments) is refused when the config loads, as is a
   path that is not its own URL-escaped form, because the router matches the
-  escaped request path while the key check matches the decoded one.
+  escaped request path while the key check matches the decoded one. A mount must
+  name an index that exists: the server refuses to start, and `server check`
+  exits nonzero, when `<name>.yml` is absent from the config directory. A mount
+  to a missing index would open, and create, an empty database, so it is refused
+  instead of served.
 - A **group** is a name for a set of mounted paths. It holds no keys.
 - A **key** is one record. It has a hash, a label, optional timestamps, and
   exactly one group.
@@ -46,7 +56,7 @@ A key never belongs to two groups.
 `qmd update` reindexes every `<index>.yml` in the config directory, and
 `qmd embed` fills vectors for every index the same way. Name an index to narrow
 either run; a missing `<name>.yml` is an error, not a silent no-op. Both skip
-`server.yml`.
+`0_qmd_server.yml`.
 
 Embeddings are per model, and the vector's dimension is part of the data: an
 index holding vectors from model A cannot be queried with model B. `qmd embed`
@@ -129,7 +139,7 @@ config that names the same hash twice, and it rejects `auth.groups.*.keys` and
    directory, which is what a reindex service should run so a new index needs no
    service-file edit.
 
-3. Mount it in `server.yml` and restart the service:
+3. Mount it in `0_qmd_server.yml` and restart the service:
 
    ```yaml
    servers:
@@ -163,7 +173,7 @@ qmd --index work update
 qmd --index work embed
 
 # 3. mount it, then restart the service
-#    server.yml: /mcp/work: work
+#    0_qmd_server.yml: /mcp/work: work
 
 # 4. issue a key that may reach only that mount
 qmd server key add work --label laptop --allow /mcp/work
@@ -191,7 +201,8 @@ qmd server key add work --label laptop --allow /mcp/work
 
 The command generates 24 random bytes, prints the key once, appends one record
 to `auth.keys`, and stores only the hash. The plaintext key is never written to
-disk by qmd, so a copy of `server.yml` cannot be replayed as a credential. Put
+disk by qmd, so a copy of `0_qmd_server.yml` cannot be replayed as a
+credential. Put
 the key in the client config, not in a note.
 
 The positional argument is the group. A group is a client role, not an index and
@@ -273,7 +284,7 @@ refused from that instant; there is no grace period.
 
 ## Rotating and revoking
 
-Keys and `public:` entries reload automatically when `server.yml` changes, and
+Keys and `public:` entries reload automatically when `0_qmd_server.yml` changes, and
 the server logs `reloaded <path>`. A mount change still needs a restart, and the
 log says so when it notices one. Until that restart the router keeps the mounts
 it started with, so a path that only exists in the edited file answers `404`.
@@ -335,14 +346,17 @@ The plaintext then exists only in the client config that presents it.
 qmd server check
 ```
 
-It reports: mounts whose index config is missing, `allow` paths that are not
-mounted, `public` paths that are not mounted, groups with no keys, groups with
-no paths, a config where no key and no public path can reach a mount, keys
-expiring within 14 days, keys that have already expired, and keys whose expiry
-precedes their issue date.
+It reports findings in two grades. A **problem** means a mount or a key cannot
+work, and makes the command exit nonzero: `allow` paths that are not mounted,
+`public` paths that are not mounted, a group that holds keys but allows no
+paths, a config where no key and no public path can reach a mount, keys that
+have already expired, and keys whose expiry precedes their issue date. A
+**warning** is housekeeping and leaves the exit status at 0: groups with no
+keys, and keys expiring within 14 days.
 
-A config that cannot load is not a finding: `server check` exits nonzero and
-prints the loader error. That covers duplicate hashes, a key naming a group that
+A config that cannot be served is not a finding: `server check` exits nonzero
+and prints the error instead of a report. That covers a mount naming an index
+with no `<name>.yml`, duplicate hashes, a key naming a group that
 does not exist, a malformed hash, an unparseable or zero-time timestamp, two
 mounts that normalize to the same path, an empty `public:` or `allow:` entry, a
 mount at `/healthz`, a mount path with a character an HTTP route cannot carry
@@ -383,11 +397,12 @@ whoever can read that file reads the private index directly:
 | Symptom | Cause |
 |---|---|
 | `404` on a path you just added | Mount not loaded, restart the service |
-| `401` with a key that worked yesterday | Key removed, or expired, or `server.yml` edited without a valid group entry |
+| `401` with a key that worked yesterday | Key removed, or expired, or `0_qmd_server.yml` edited without a valid group entry |
 | `401` only from one client | Client sends the key to a path its group does not allow |
 | Server refuses to start, "recorded twice" | Same hash in two key records; remove one |
 | Server refuses to start, "keys belong in auth.keys" | Keys still sit under `auth.groups.*`; move them to `auth.keys` |
-| Server exits on startup, "no servers defined" | `server.yml` has no `servers:` map |
-| Server exits on startup, "no such file or directory" | `server.yml` is missing |
+| Server exits on startup, "no servers defined" | `0_qmd_server.yml` has no `servers:` map |
+| Server exits on startup, a mount "points at index ... which has no config" | The mount names an index with no `<name>.yml`; fix the name or create the index |
+| Server exits on startup, "no such file or directory" | `0_qmd_server.yml` is missing |
 | Every path returns `401` including one you expected public | `public:` entries are matched exactly, check the leading slash |
 | Slow first search | Embedding model cold start, not auth |

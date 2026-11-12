@@ -28,7 +28,7 @@ func TestAddServerKeyStoresOnlyHash(t *testing.T) {
 	}
 	text := string(body)
 	if strings.Contains(text, key) {
-		t.Fatal("plaintext key written to server.yml")
+		t.Fatal("plaintext key written to the server config")
 	}
 	if !strings.Contains(text, "# mounts and auth") {
 		t.Error("comments were dropped")
@@ -344,12 +344,15 @@ func TestListServerKeys(t *testing.T) {
 }
 
 func TestCheckServerConfig(t *testing.T) {
-	t.Setenv("QMD_CONFIG_DIR", t.TempDir())
+	dir := t.TempDir()
+	t.Setenv("QMD_CONFIG_DIR", dir)
+	if err := os.WriteFile(filepath.Join(dir, "index.yml"), []byte("collections: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	expired := time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
 	soon := time.Now().Add(7 * 24 * time.Hour).UTC().Format(time.RFC3339)
 	body := fmt.Sprintf(`servers:
   /mcp: index
-  /mcp/stale: missing
 auth:
   groups:
     empty:
@@ -366,26 +369,34 @@ auth:
       expires: %s
 `, hashKey("a"), expired, hashKey("b"), soon)
 	p := writeServerYAML(t, body)
-	findings, err := checkServerConfig(p)
+	problems, warnings, err := checkServerConfig(p)
 	if err != nil {
 		t.Fatal(err)
 	}
-	joined := strings.Join(findings, "\n")
-	for _, want := range []string{"missing", "expired on", "expires on", "no keys"} {
+	if joined := strings.Join(problems, "\n"); !strings.Contains(joined, "expired on") {
+		t.Errorf("an expired key is not a problem:\n%s", joined)
+	}
+	joined := strings.Join(warnings, "\n")
+	for _, want := range []string{"expires on", "no keys"} {
 		if !strings.Contains(joined, want) {
-			t.Errorf("findings missing %q:\n%s", want, joined)
+			t.Errorf("warnings missing %q:\n%s", want, joined)
 		}
 	}
-	if !sort.StringsAreSorted(findings) {
-		t.Errorf("findings are not sorted:\n%s", joined)
+	if strings.Contains(joined, "expired on") {
+		t.Errorf("an expired key is only a warning:\n%s", joined)
+	}
+	if !sort.StringsAreSorted(problems) || !sort.StringsAreSorted(warnings) {
+		t.Errorf("findings are not sorted:\nproblems: %v\nwarnings: %v", problems, warnings)
 	}
 }
 
 func TestCheckServerConfigFindings(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("QMD_CONFIG_DIR", dir)
-	if err := os.WriteFile(filepath.Join(dir, "index.yml"), []byte("collections: {}\n"), 0o600); err != nil {
-		t.Fatal(err)
+	for _, name := range []string{"index.yml", "work.yml"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("collections: {}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	body := fmt.Sprintf(`servers:
   /mcp: index
@@ -404,23 +415,48 @@ auth:
       expires: 2027-01-01
 `, hashKey("k"))
 	p := writeServerYAML(t, body)
-	findings, err := checkServerConfig(p)
+	problems, warnings, err := checkServerConfig(p)
 	if err != nil {
 		t.Fatal(err)
 	}
-	joined := strings.Join(findings, "\n")
-	if strings.Contains(joined, `index "index"`) {
-		t.Errorf("index.yml exists, but it is reported missing:\n%s", joined)
-	}
 	for _, want := range []string{
-		`index "work"`,
 		"public path /mcp/typo is not mounted",
-		`group "unused" has no keys`,
 		"expires on 2027-01-01, before it was issued on 2027-06-01",
 	} {
-		if !strings.Contains(joined, want) {
-			t.Errorf("findings missing %q:\n%s", want, joined)
+		if !strings.Contains(strings.Join(problems, "\n"), want) {
+			t.Errorf("problems missing %q:\n%v", want, problems)
 		}
+	}
+	if want := `group "unused" has no keys`; !strings.Contains(strings.Join(warnings, "\n"), want) {
+		t.Errorf("warnings missing %q:\n%v", want, warnings)
+	}
+}
+
+func TestCheckRefusesMountWithoutIndexConfig(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("QMD_CONFIG_DIR", dir)
+	if err := os.WriteFile(filepath.Join(dir, "public.yml"), []byte("collections: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p := writeServerYAML(t, `servers:
+  /mcp: public
+  /mcp/pub: index
+`)
+	sc, err := loadServerConfig(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = validateMountIndexes(sc, p)
+	if err == nil {
+		t.Fatal("a mount to an index with no config passed validation")
+	}
+	for _, want := range []string{"/mcp/pub", `"index"`, filepath.Join(dir, "index.yml")} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error does not name %q: %v", want, err)
+		}
+	}
+	if _, _, err := checkServerConfig(p); err == nil {
+		t.Fatal("check accepted a mount to an index with no config")
 	}
 }
 
@@ -431,7 +467,7 @@ func TestCheckReportsDuplicateAsError(t *testing.T) {
       group: laptop
 `, hashKey("dup"), hashKey("dup")))
 	p := writeServerYAML(t, body)
-	_, err := checkServerConfig(p)
+	_, _, err := checkServerConfig(p)
 	if err == nil || !strings.Contains(err.Error(), "twice") {
 		t.Fatalf("want duplicate error from check, got %v", err)
 	}
@@ -456,11 +492,11 @@ auth:
       expires: 2020-01-01
 `, hashKey("zero-life"))
 	p := writeServerYAML(t, body)
-	findings, err := checkServerConfig(p)
+	problems, warnings, err := checkServerConfig(p)
 	if err != nil {
 		t.Fatal(err)
 	}
-	joined := strings.Join(findings, "\n")
+	joined := strings.Join(append(problems, warnings...), "\n")
 	if !strings.Contains(joined, "expired on 2020-01-01") {
 		t.Errorf("a key whose expiry equals its issue date is not reported expired:\n%s", joined)
 	}
@@ -482,11 +518,11 @@ auth:
     work:
       allow: [/mcp]
 `)
-	findings, err := checkServerConfig(p)
+	problems, warnings, err := checkServerConfig(p)
 	if err != nil {
 		t.Fatal(err)
 	}
-	joined := strings.Join(findings, "\n")
+	joined := strings.Join(append(problems, warnings...), "\n")
 	if !strings.Contains(joined, "every mount answers 401") {
 		t.Errorf("findings do not report an unreachable server:\n%s", joined)
 	}
@@ -496,11 +532,11 @@ auth:
 auth:
   public: [/mcp]
 `)
-	findings, err = checkServerConfig(p)
+	problems, warnings, err = checkServerConfig(p)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(strings.Join(findings, "\n"), "every mount answers 401") {
+	if strings.Contains(strings.Join(append(problems, warnings...), "\n"), "every mount answers 401") {
 		t.Error("public-only config reported as unreachable")
 	}
 }

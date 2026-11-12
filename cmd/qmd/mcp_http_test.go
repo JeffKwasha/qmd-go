@@ -47,7 +47,7 @@ func testKeysYAML() string {
 
 func writeServerYAML(t *testing.T, body string) string {
 	t.Helper()
-	p := filepath.Join(t.TempDir(), "server.yml")
+	p := filepath.Join(t.TempDir(), "srv.yml")
 	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}

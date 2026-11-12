@@ -1,8 +1,8 @@
 package main
 
-// Management commands for the HTTP MCP server config. They edit server.yml in
-// place, preserving comments and key order by operating on the YAML node tree
-// rather than re-marshalling a struct.
+// Management commands for the HTTP MCP server config. They edit the server
+// file in place, preserving comments and key order by operating on the YAML
+// node tree rather than re-marshalling a struct.
 //
 // Keys live in the single auth.keys list, one record per key. The commands
 // never write the legacy groups.*.keys / key_hashes layout, and the loader
@@ -12,12 +12,10 @@ import (
 	"bytes"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
-	"github.com/ba0f3/qmd-go/internal/config"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )
@@ -388,72 +386,64 @@ func listServerKeys(path string) ([]keyRow, error) {
 	return out, nil
 }
 
-// checkServerConfig reports configuration problems that do not stop the server
-// from starting: dead mounts, allow paths that reach nothing, groups no key can
-// use, and keys that are expired or about to expire.
-func checkServerConfig(path string) ([]string, error) {
+// checkServerConfig reports what a config that loads still gets wrong. A
+// problem makes a mount or a key unusable, so it is worth a nonzero exit; a
+// warning is housekeeping. A missing index config never reaches here: the
+// loader refuses it, because serving such a mount would mean serving a database
+// nothing can have written to.
+func checkServerConfig(path string) (problems, warnings []string, err error) {
 	sc, err := loadServerConfig(path)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	dir, err := config.GetConfigDir()
-	if err != nil {
-		return nil, err
-	}
-	var findings []string
-	for mount, idx := range sc.Servers {
-		name := idx
-		if name == "" {
-			name = "index"
-		}
-		if _, err := os.Stat(filepath.Join(dir, name+".yml")); err != nil {
-			findings = append(findings, fmt.Sprintf("mount %s points at index %q, which has no %s.yml", mount, name, name))
-		}
+	if err := validateMountIndexes(sc, path); err != nil {
+		return nil, nil, err
 	}
 	keysPerGroup := make(map[string]int, len(sc.Auth.Groups))
 	for _, e := range sc.byHash {
 		keysPerGroup[e.Group]++
 	}
 	if len(sc.byHash) == 0 && len(sc.Auth.Public) == 0 {
-		findings = append(findings, "no keys and no public paths: every mount answers 401")
+		problems = append(problems, "no keys and no public paths: every mount answers 401")
 	}
 	for _, p := range sc.Auth.Public {
 		if _, ok := sc.Servers[p]; !ok {
-			findings = append(findings, fmt.Sprintf("public path %s is not mounted", p))
+			problems = append(problems, fmt.Sprintf("public path %s is not mounted", p))
 		}
 	}
 	for name, g := range sc.Auth.Groups {
 		if keysPerGroup[name] == 0 {
-			findings = append(findings, fmt.Sprintf("group %q has no keys, so nothing can use it", name))
-		}
-		if len(g.Allow) == 0 {
-			findings = append(findings, fmt.Sprintf("group %q allows no paths", name))
+			warnings = append(warnings, fmt.Sprintf("group %q has no keys, so nothing can use it", name))
+		} else if len(g.Allow) == 0 {
+			problems = append(problems, fmt.Sprintf("group %q holds %d key(s) but allows no paths",
+				name, keysPerGroup[name]))
 		}
 		for _, a := range g.Allow {
 			if _, ok := sc.Servers[normalizePath(a)]; !ok {
-				findings = append(findings, fmt.Sprintf("group %q allows %s, which is not mounted", name, a))
+				problems = append(problems, fmt.Sprintf("group %q allows %s, which is not mounted", name, a))
 			}
 		}
 	}
 	now := time.Now()
 	for _, e := range sc.byHash {
 		if !e.Issued.IsZero() && !e.Expires.IsZero() && e.Expires.Before(e.Issued) {
-			findings = append(findings, fmt.Sprintf("key %s (group %q) expires on %s, before it was issued on %s",
+			problems = append(problems, fmt.Sprintf("key %s (group %q) expires on %s, before it was issued on %s",
 				shortHash(e.Hash), e.Group, e.Expires.Format("2006-01-02"), e.Issued.Format("2006-01-02")))
 			continue
 		}
 		switch {
 		case e.Expires.IsZero():
 		case !now.Before(e.Expires):
-			findings = append(findings, fmt.Sprintf("key %s (group %q) expired on %s; remove it with: qmd server key remove %s",
+			problems = append(problems, fmt.Sprintf("key %s (group %q) expired on %s; remove it with: qmd server key remove %s",
 				shortHash(e.Hash), e.Group, e.Expires.Format("2006-01-02"), shortHash(e.Hash)))
 		case e.Expires.Sub(now) <= 14*24*time.Hour:
-			findings = append(findings, fmt.Sprintf("key %s (group %q) expires on %s",
+			warnings = append(warnings, fmt.Sprintf("key %s (group %q) expires on %s",
 				shortHash(e.Hash), e.Group, e.Expires.Format("2006-01-02")))
 		}
 	}
-	sort.Strings(findings)
-	return findings, nil
+	sort.Strings(problems)
+	sort.Strings(warnings)
+	return problems, warnings, nil
 }
 
 func shortHash(h string) string {
@@ -473,7 +463,7 @@ func expiryLabel(t time.Time) string {
 var serverCmd = &cobra.Command{
 	Use:   "server",
 	Short: "Manage the HTTP MCP server config (indexes, keys, access)",
-	Long:  "Edit ~/.config/qmd/server.yml: add indexes as mounts, issue and revoke bearer keys, and check for dead access rules.",
+	Long:  "Edit ~/.config/qmd/0_qmd_server.yml: add indexes as mounts, issue and revoke bearer keys, and check for dead access rules.",
 }
 
 var keyCmd = &cobra.Command{
@@ -570,21 +560,31 @@ var keyRemoveCmd = &cobra.Command{
 var serverCheckCmd = &cobra.Command{
 	Use:   "check",
 	Short: "Report mounts, access rules and keys that need attention",
+	// The command prints its own report and one closing line; cobra repeats
+	// neither the usage nor the error.
+	SilenceUsage:  true,
+	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		path, err := serverConfigPath(cmd)
 		if err != nil {
 			return err
 		}
-		findings, err := checkServerConfig(path)
+		problems, warnings, err := checkServerConfig(path)
 		if err != nil {
 			return err
 		}
-		if len(findings) == 0 {
+		if len(problems) == 0 && len(warnings) == 0 {
 			fmt.Println("ok")
 			return nil
 		}
-		for _, f := range findings {
-			fmt.Println("- " + f)
+		for _, w := range warnings {
+			fmt.Println("warning: " + w)
+		}
+		for _, p := range problems {
+			fmt.Println("problem: " + p)
+		}
+		if len(problems) > 0 {
+			return fmt.Errorf("%s: %d problem(s) to fix", path, len(problems))
 		}
 		return nil
 	},
@@ -596,7 +596,7 @@ func serverConfigPath(cmd *cobra.Command) (string, error) {
 }
 
 func init() {
-	serverCmd.PersistentFlags().String("server-config", "", "Server config YAML (default ~/.config/qmd/server.yml)")
+	serverCmd.PersistentFlags().String("server-config", "", "Server config YAML (default <configdir>/0_qmd_server.yml)")
 	keyAddCmd.Flags().String("label", "", "Label for the key, e.g. a device name")
 	keyAddCmd.Flags().StringArray("allow", nil, "Paths the group may use (repeatable); omit to keep existing")
 	keyAddCmd.Flags().String("expires", "", "Expiry: 30d, 720h, 2027-03-01 or RFC3339; omit for never")

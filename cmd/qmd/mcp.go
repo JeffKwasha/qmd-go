@@ -82,13 +82,17 @@ var mcpCmd = &cobra.Command{
 	Use:   "mcp",
 	Short: "Run MCP server (stdio or streamable HTTP)",
 	Long:  "Start the Model Context Protocol server for QMD. Exposes search, get, and document resources. Defaults to stdio; with --http it serves multiple named indexes over MCP streamable HTTP, gated by bearer keys defined in the auth config.",
-	RunE:  runMCPServer,
+	// A config the server refuses is read in a service journal; usage
+	// suggestions and a repeated error line only bury it.
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runMCPServer,
 }
 
 func init() {
 	mcpCmd.Flags().Bool("http", false, "Serve over MCP streamable HTTP instead of stdio")
 	mcpCmd.Flags().String("addr", "127.0.0.1:8422", "HTTP listen address (with --http)")
-	mcpCmd.Flags().String("server-config", "", "Server config YAML (with --http; default ~/.config/qmd/server.yml)")
+	mcpCmd.Flags().String("server-config", "", "Server config YAML (with --http; default <configdir>/0_qmd_server.yml)")
 	rootCmd.AddCommand(mcpCmd)
 }
 
