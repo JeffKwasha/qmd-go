@@ -20,7 +20,7 @@ var updateCmd = &cobra.Command{
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		names, err := updateTargets(cmd.Flag("index").Changed, getIndexName())
+		names, err := indexTargets(cmd.Flag("index").Changed, getIndexName())
 		if err != nil {
 			return err
 		}
@@ -36,10 +36,10 @@ var updateCmd = &cobra.Command{
 	},
 }
 
-// updateTargets answers which indexes this run touches. With --index it is that
+// indexTargets answers which indexes this run touches. With --index it is that
 // one index and a missing config is an error; without it, every <index>.yml in
 // the config dir, so a new index needs no service edit.
-func updateTargets(explicit bool, name string) ([]string, error) {
+func indexTargets(explicit bool, name string) ([]string, error) {
 	dir, err := config.GetConfigDir()
 	if err != nil {
 		return nil, err

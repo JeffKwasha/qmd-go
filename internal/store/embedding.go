@@ -218,3 +218,23 @@ func cosineSimilarity(a, b []float32) float64 {
 	}
 	return dot / (math.Sqrt(normA) * math.Sqrt(normB))
 }
+
+// EmbeddingModels lists the distinct models recorded for stored vectors, sorted.
+// A non-empty result that does not match the configured model means the index
+// holds vectors from another model, which cannot be compared by dimension.
+func (s *Store) EmbeddingModels() ([]string, error) {
+	rows, err := s.DB.Query(`SELECT DISTINCT model FROM content_vectors WHERE model <> '' ORDER BY model`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var models []string
+	for rows.Next() {
+		var m string
+		if err := rows.Scan(&m); err != nil {
+			return nil, err
+		}
+		models = append(models, m)
+	}
+	return models, rows.Err()
+}

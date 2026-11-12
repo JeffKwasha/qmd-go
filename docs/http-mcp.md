@@ -41,6 +41,32 @@ Two files matter, and they are separate on purpose:
 A key that reaches several mounts does so because its group lists several paths.
 A key never belongs to two groups.
 
+## Keeping indexes current
+
+`qmd update` reindexes every `<index>.yml` in the config directory, and
+`qmd embed` fills vectors for every index the same way. Name an index to narrow
+either run; a missing `<name>.yml` is an error, not a silent no-op. Both skip
+`server.yml`.
+
+Embeddings are per model, and the vector's dimension is part of the data: an
+index holding vectors from model A cannot be queried with model B. `qmd embed`
+records the model in `content_vectors` and refuses to run when the configured
+`QMD_EMBED_MODEL` differs from what is stored:
+
+    index "personal": holds embeddings from model "jina-v5-small-text-matching" while the configured model is "nomic-embed-text"; run qmd embed --force to rebuild
+
+`--force` clears the targeted indexes' vectors and re-embeds their documents;
+with no `--index` that is every index, so narrow it when only one model changed.
+Nothing rebuilds automatically, so a model change is a deliberate rebuild.
+
+A reindex unit needs the config directory and two lines:
+
+```ini
+Environment=QMD_CONFIG_DIR=/mnt/srv/qmd
+ExecStart=/mnt/pool/tools/bin/qmd update
+ExecStart=/mnt/pool/tools/bin/qmd embed
+```
+
 ## The key file
 
 ```yaml
