@@ -10,9 +10,24 @@ import (
 	"github.com/spf13/cobra"
 )
 
+const version = "1.0.0"
+
+// versionString answers "which build is this?" in one line per fact. `qmd
+// --version` and `qmd version` print it, because the CLI's file formats change
+// between builds and an installed binary is not visibly one version or another.
+func versionString() string {
+	build := "API backend only (Ollama/OpenAI)"
+	if llm.GGUFEnabled() {
+		build = "GGUF support enabled"
+	}
+	return fmt.Sprintf("qmd version %s\nBuild: %s\nDefault embed model: %s\n",
+		version, build, llm.DefaultEmbedModel())
+}
+
 var rootCmd = &cobra.Command{
-	Use:   "qmd",
-	Short: "Quick Markdown Search",
+	Use:     "qmd",
+	Short:   "Quick Markdown Search",
+	Version: versionString(),
 	Long: `An on-device search engine for everything you need to remember.
 Index your markdown notes, meeting transcripts, documentation, and knowledge bases.`,
 }
@@ -21,14 +36,7 @@ var versionCmd = &cobra.Command{
 	Use:   "version",
 	Short: "Show version and build info",
 	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Println("qmd version 1.0.0")
-		if llm.GGUFEnabled() {
-			fmt.Println("Build: GGUF support enabled")
-			fmt.Printf("Default embed model: %s\n", llm.DefaultEmbedModel())
-		} else {
-			fmt.Println("Build: API backend only (Ollama/OpenAI)")
-			fmt.Printf("Default embed model: %s\n", llm.DefaultEmbedModel())
-		}
+		fmt.Fprint(cmd.OutOrStdout(), versionString())
 	},
 }
 
@@ -65,5 +73,6 @@ func Execute() {
 
 func init() {
 	rootCmd.PersistentFlags().String("index", "", "Use named index (default: index)")
+	rootCmd.SetVersionTemplate("{{.Version}}")
 	rootCmd.AddCommand(versionCmd)
 }

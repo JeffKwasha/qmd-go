@@ -117,7 +117,7 @@ func runMCPServer(cmd *cobra.Command, args []string) error {
 // store. cfg is the collection config of that store's index and is only used
 // for path-context annotations; nil is safe.
 func newServer(s *store.Store, cfg *config.Config) *mcp.Server {
-	server := mcp.NewServer(&mcp.Implementation{Name: "qmd", Version: "1.0.0"}, nil)
+	server := mcp.NewServer(&mcp.Implementation{Name: "qmd", Version: version}, nil)
 
 	server.AddResourceTemplate(&mcp.ResourceTemplate{URITemplate: "qmd://{+path}"}, resourceHandler(s, cfg))
 	server.AddPrompt(&mcp.Prompt{

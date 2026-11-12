@@ -43,6 +43,7 @@ qmd vsearch <query>               # Vector similarity search
 qmd query <query>                 # Hybrid search (BM25 + vector, RRF)
 qmd mcp                           # Run MCP server (stdio)
 qmd cleanup                       # Remove cache, orphaned data, vacuum DB
+qmd --version                     # Version, backend and default embed model
 ```
 
 ## Collection Management
