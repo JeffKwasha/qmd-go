@@ -2,6 +2,25 @@
 
 QMD is implemented in **Go**. Use the Go CLI and avoid modifying the SQLite index directly.
 
+## Working in this checkout
+
+This repository is shared with an agent account in group `claude`. The tree and
+`.git` must stay group-writable, with a default ACL so new files stay editable
+by the owner:
+
+```sh
+chmod -R g+rwX . && setfacl -R -d -m g::rwx .
+```
+
+If a write fails, stop and ask for that command. Do not clone the repository
+elsewhere, work under `/tmp`, or report a commit that is not in this
+repository's history. Keep agent work in a registered worktree:
+
+```sh
+git worktree add .worktrees/<name> -b <branch>
+git worktree remove .worktrees/<name>
+```
+
 ## Commands
 
 ```sh
