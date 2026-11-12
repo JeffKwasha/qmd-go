@@ -13,12 +13,13 @@ import (
 var CurrentIndexName = "index"
 
 // ServerConfigName is the file in the config dir holding mounts and auth. It is
-// not an index config, so index discovery skips it. The digit prefix is what
-// puts it first in a directory listing: `_` is ignored by collation and sorts
-// with the following letter, so `_qmd_server.yml` would land among the indexes.
-const ServerConfigName = "0_qmd_server.yml"
+// not an index config, so index discovery skips it. The uppercase name is what
+// puts it above the indexes in a listing: `C` is below every lowercase letter
+// both in byte order and at the primary collation level, while `_` is ignored
+// by collation and lands after the letters.
+const ServerConfigName = "CONFIG.yml"
 
-// legacyServerConfigName is the name this file had before the digit prefix. A
+// legacyServerConfigName is the name this file had before it was CONFIG.yml. A
 // copy left behind would be walked as an index named "server", so discovery
 // recognises its content and asks for the rename.
 const legacyServerConfigName = "server.yml"

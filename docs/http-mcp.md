@@ -5,12 +5,12 @@ mounted at its own URL path, and bearer keys decide which paths a client may
 reach.
 
 ```
-qmd mcp --http --addr 127.0.0.1:8422 --server-config ~/.config/qmd/0_qmd_server.yml
+qmd mcp --http --addr 127.0.0.1:8422 --server-config ~/.config/qmd/CONFIG.yml
 ```
 
 The server config is resolved from `--server-config`, then `$QMD_SERVER_CONFIG`,
-then `$QMD_CONFIG_DIR/0_qmd_server.yml`, then
-`~/.config/qmd/0_qmd_server.yml`. A service should set one of the first two,
+then `$QMD_CONFIG_DIR/CONFIG.yml`, then
+`~/.config/qmd/CONFIG.yml`. A service should set one of the first two,
 because a default that follows `$HOME` silently points somewhere else when the
 unit changes account or scope. The same resolution applies to `qmd server key`
 and `qmd server check`.
@@ -20,12 +20,14 @@ Two files matter, and they are separate on purpose:
 | File | Holds | Read by |
 |---|---|---|
 | `~/.config/qmd/<index>.yml` | Collections: name, path, glob, context | CLI and server |
-| `~/.config/qmd/0_qmd_server.yml` | Mounts (URL path to index), groups, keys | Server only |
+| `~/.config/qmd/CONFIG.yml` | Mounts (URL path to index), groups, keys | Server only |
 
-The server file carries a digit prefix so a directory listing puts it first;
-collation ignores `_`, so `_qmd_server.yml` would sort among the indexes. Index
-discovery skips it by name, and refuses a server config left under the old name
-`server.yml` rather than walking it as an index called `server`.
+The server file is upper case so a listing puts it above the indexes: `C` sorts
+below every lower-case letter both in byte order and at the primary collation
+level. Index discovery skips it by name, and refuses a server config left under
+the old name `server.yml` rather than walking it as an index called `server`.
+The path is configurable: `--server-config` or `$QMD_SERVER_CONFIG` may point
+anywhere, and only the default name is special.
 
 ## Model
 
@@ -56,7 +58,7 @@ A key never belongs to two groups.
 `qmd update` reindexes every `<index>.yml` in the config directory, and
 `qmd embed` fills vectors for every index the same way. Name an index to narrow
 either run; a missing `<name>.yml` is an error, not a silent no-op. Both skip
-`0_qmd_server.yml`.
+`CONFIG.yml`.
 
 Embeddings are per model, and the vector's dimension is part of the data: an
 index holding vectors from model A cannot be queried with model B. `qmd embed`
@@ -139,7 +141,7 @@ config that names the same hash twice, and it rejects `auth.groups.*.keys` and
    directory, which is what a reindex service should run so a new index needs no
    service-file edit.
 
-3. Mount it in `0_qmd_server.yml` and restart the service:
+3. Mount it in `CONFIG.yml` and restart the service:
 
    ```yaml
    servers:
@@ -173,7 +175,7 @@ qmd --index work update
 qmd --index work embed
 
 # 3. mount it, then restart the service
-#    0_qmd_server.yml: /mcp/work: work
+#    CONFIG.yml: /mcp/work: work
 
 # 4. issue a key that may reach only that mount
 qmd server key add work --label laptop --allow /mcp/work
@@ -201,7 +203,7 @@ qmd server key add work --label laptop --allow /mcp/work
 
 The command generates 24 random bytes, prints the key once, appends one record
 to `auth.keys`, and stores only the hash. The plaintext key is never written to
-disk by qmd, so a copy of `0_qmd_server.yml` cannot be replayed as a
+disk by qmd, so a copy of `CONFIG.yml` cannot be replayed as a
 credential. Put
 the key in the client config, not in a note.
 
@@ -284,7 +286,7 @@ refused from that instant; there is no grace period.
 
 ## Rotating and revoking
 
-Keys and `public:` entries reload automatically when `0_qmd_server.yml` changes, and
+Keys and `public:` entries reload automatically when `CONFIG.yml` changes, and
 the server logs `reloaded <path>`. A mount change still needs a restart, and the
 log says so when it notices one. Until that restart the router keeps the mounts
 it started with, so a path that only exists in the edited file answers `404`.
@@ -397,12 +399,12 @@ whoever can read that file reads the private index directly:
 | Symptom | Cause |
 |---|---|
 | `404` on a path you just added | Mount not loaded, restart the service |
-| `401` with a key that worked yesterday | Key removed, or expired, or `0_qmd_server.yml` edited without a valid group entry |
+| `401` with a key that worked yesterday | Key removed, or expired, or `CONFIG.yml` edited without a valid group entry |
 | `401` only from one client | Client sends the key to a path its group does not allow |
 | Server refuses to start, "recorded twice" | Same hash in two key records; remove one |
 | Server refuses to start, "keys belong in auth.keys" | Keys still sit under `auth.groups.*`; move them to `auth.keys` |
-| Server exits on startup, "no servers defined" | `0_qmd_server.yml` has no `servers:` map |
+| Server exits on startup, "no servers defined" | `CONFIG.yml` has no `servers:` map |
 | Server exits on startup, a mount "points at index ... which has no config" | The mount names an index with no `<name>.yml`; fix the name or create the index |
-| Server exits on startup, "no such file or directory" | `0_qmd_server.yml` is missing |
+| Server exits on startup, "no such file or directory" | `CONFIG.yml` is missing |
 | Every path returns `401` including one you expected public | `public:` entries are matched exactly, check the leading slash |
 | Slow first search | Embedding model cold start, not auth |
