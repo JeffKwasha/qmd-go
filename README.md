@@ -99,15 +99,30 @@ auth:
   public: [/mcp, /mcp/shared]   # reachable without a key
   groups:
     personal:
-      keys: ["<token>"]         # generate: openssl rand -hex 24
-      allow: [/mcp/personal, /mcp, /mcp/shared]
+      allow: [/mcp/personal, /mcp]
+      key_hashes:               # store hashes, never the key itself
+        - hash: "sha256:<hex>"
+          label: laptop
+```
+
+Issue keys with the CLI rather than by hand. Only the hash is written:
+
+```bash
+qmd server key add personal --label laptop --allow /mcp/personal
+qmd server key list
+qmd server key remove sha256:ab12cd34
+qmd server check            # dead mounts, dead allow rules, duplicate or plaintext keys
 ```
 
 No key reaches public paths only; a valid key reaches the paths its group allows.
 Unknown paths return 404, denied requests 401 (`WWW-Authenticate: Bearer`). Keys are
 compared in constant time and logged only as `sha256:<8>`. `GET /healthz` reports
-liveness. Point any streamable-HTTP MCP client at
+liveness. Keys and `public:` entries reload without a restart; adding a mount still
+needs one. Point any streamable-HTTP MCP client at
 `http://127.0.0.1:8422/mcp`; add `Authorization: Bearer <token>` for private indexes.
+
+Full guide: [docs/http-mcp.md](docs/http-mcp.md), which also covers adding an index
+and the filesystem exposure of the SQLite files themselves.
 
 **Claude Desktop** (`~/Library/Application Support/Claude/claude_desktop_config.json`):
 
