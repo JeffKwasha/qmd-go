@@ -8,6 +8,12 @@ reach.
 qmd mcp --http --addr 127.0.0.1:8422 --server-config ~/.config/qmd/server.yml
 ```
 
+The server config is resolved from `--server-config`, then `$QMD_SERVER_CONFIG`,
+then `$QMD_CONFIG_DIR/server.yml`, then `~/.config/qmd/server.yml`. A service
+should set one of the first two, because a default that follows `$HOME` silently
+points somewhere else when the unit changes account or scope. The same
+resolution applies to `qmd server key` and `qmd server check`.
+
 Two files matter, and they are separate on purpose:
 
 | File | Holds | Read by |
@@ -91,6 +97,11 @@ config that names the same hash twice, and it rejects `auth.groups.*.keys` and
    qmd --index work update
    qmd --index work embed
    ```
+
+   Naming the index limits the run to it, and fails if `work.yml` is missing.
+   `qmd update` with no `--index` walks every `<index>.yml` in the config
+   directory, which is what a reindex service should run so a new index needs no
+   service-file edit.
 
 3. Mount it in `server.yml` and restart the service:
 

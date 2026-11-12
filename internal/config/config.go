@@ -4,11 +4,17 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
 
 var CurrentIndexName = "index"
+
+// ServerConfigName is the file in the config dir holding mounts and auth. It is
+// not an index config, so index discovery skips it.
+const ServerConfigName = "server.yml"
 
 func GetConfigDir() (string, error) {
 	if dir := os.Getenv("QMD_CONFIG_DIR"); dir != "" {
@@ -27,6 +33,38 @@ func GetConfigFilePath() (string, error) {
 		return "", err
 	}
 	return filepath.Join(dir, fmt.Sprintf("%s.yml", CurrentIndexName)), nil
+}
+
+// IndexNames lists the indexes defined in the config dir: one <name>.yml per
+// index, skipping the server config, dotfiles and directories. Reindexing with
+// no explicit index walks this list.
+func IndexNames() ([]string, error) {
+	dir, err := GetConfigDir()
+	if err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	reserved := strings.TrimSuffix(ServerConfigName, ".yml")
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || strings.HasPrefix(name, ".") || !strings.HasSuffix(name, ".yml") {
+			continue
+		}
+		name = strings.TrimSuffix(name, ".yml")
+		if name == reserved {
+			continue
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names, nil
 }
 
 func EnsureConfigDir() error {

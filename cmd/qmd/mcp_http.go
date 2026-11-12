@@ -394,16 +394,21 @@ func loadServerConfig(path string) (*serverConfig, error) {
 	return parseServerConfig(data, path)
 }
 
-// resolveServerConfigPath turns "" into the default location.
+// resolveServerConfigPath resolves the server config: the explicit flag, then
+// $QMD_SERVER_CONFIG, then the config dir. The env var lets a service pin the
+// file without repeating a flag in every command.
 func resolveServerConfigPath(path string) (string, error) {
 	if path != "" {
 		return path, nil
+	}
+	if env := strings.TrimSpace(os.Getenv("QMD_SERVER_CONFIG")); env != "" {
+		return env, nil
 	}
 	dir, err := config.GetConfigDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, "server.yml"), nil
+	return filepath.Join(dir, config.ServerConfigName), nil
 }
 
 func isPublic(sc *serverConfig, path string) bool {

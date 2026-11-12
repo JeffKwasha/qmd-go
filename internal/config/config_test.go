@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -61,5 +62,43 @@ func TestLoadSaveConfig(t *testing.T) {
 		if col.Context["/"] != "root context" {
 			t.Errorf("Expected context 'root context', got '%s'", col.Context["/"])
 		}
+	}
+}
+
+func TestIndexNames(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"index.yml", "personal.yml", "work.yml", "notes.md", "server.yml", ".hidden.yml"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("collections: {}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Mkdir(filepath.Join(dir, "sub.yml"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("QMD_CONFIG_DIR", dir)
+
+	got, err := IndexNames()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"index", "personal", "work"}
+	if len(got) != len(want) {
+		t.Fatalf("IndexNames() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("IndexNames() = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestIndexNamesMissingDir(t *testing.T) {
+	t.Setenv("QMD_CONFIG_DIR", filepath.Join(t.TempDir(), "absent"))
+	got, err := IndexNames()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Errorf("IndexNames() = %v, want none", got)
 	}
 }
