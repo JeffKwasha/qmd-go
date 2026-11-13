@@ -97,7 +97,14 @@ func resolveSources() ([]indexSource, error) {
 	if len(names) == 0 {
 		return nil, fmt.Errorf("no indexes in %s: add one with qmd collection add", mustConfigDir())
 	}
-	return openSources(names)
+	sources, err := openSources(names)
+	if err != nil {
+		return nil, err
+	}
+	if len(sources) == 0 {
+		return nil, fmt.Errorf("no built index in %s: run qmd update", mustConfigDir())
+	}
+	return sources, nil
 }
 
 // namedSources opens exactly the indexes a mount names, in the order given.
@@ -265,7 +272,7 @@ func runFTS(sources []indexSource, query string, limit int, collection string, m
 		lists = append(lists, list)
 	}
 	if len(lists) == 0 && len(errs) > 0 {
-		return nil, errs[0]
+		return nil, errors.Join(errs...)
 	}
 	for _, err := range errs {
 		fmt.Fprintf(os.Stderr, "qmd: %v\n", err)
@@ -319,7 +326,7 @@ func runVectors(sources []indexSource, query string, limit int, minScore float64
 		lists = append(lists, list)
 	}
 	if len(lists) == 0 && len(errs) > 0 {
-		return nil, errs[0]
+		return nil, errors.Join(errs...)
 	}
 	for _, err := range errs {
 		fmt.Fprintf(os.Stderr, "qmd: %v\n", err)
@@ -345,7 +352,10 @@ func runHybrid(sources []indexSource, query string, limit int, collection string
 		vec, vecErr := runVectors(one, query, limit, minScore, collection)
 		// An index that produced a list answered, even if that list is empty:
 		// "no match here" is an answer, and must not be reported as a failure.
-		if ftsErr == nil || vecErr == nil {
+		// runVectors returns nil for an index with no vectors, so that silence
+		// is not an answer - otherwise a broken full-text index in a corpus that
+		// was never embedded would look like a clean miss.
+		if ftsErr == nil || (src.hasVectors() && vecErr == nil) {
 			answered = true
 		}
 		if ftsErr != nil {
@@ -358,7 +368,7 @@ func runHybrid(sources []indexSource, query string, limit int, collection string
 	}
 	out := fuseLists(lists)
 	if len(out) == 0 && len(errs) > 0 && !answered {
-		return nil, errs[0]
+		return nil, errors.Join(errs...)
 	}
 	for _, err := range errs {
 		fmt.Fprintf(os.Stderr, "qmd: %v\n", err)

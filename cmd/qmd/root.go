@@ -123,7 +123,7 @@ func Execute() {
 }
 
 func init() {
-	rootCmd.PersistentFlags().String("index", "", "Use one named index (default: index.yml)")
+	rootCmd.PersistentFlags().String("index", "", "Use named index (default: index.yml, or every index for reads)")
 	rootCmd.SetVersionTemplate("{{.Version}}")
 	rootCmd.AddCommand(versionCmd)
 }

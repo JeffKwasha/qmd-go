@@ -489,3 +489,56 @@ func TestMultiGetGlobCarriesIndex(t *testing.T) {
 		}
 	}
 }
+
+func TestRunHybridFailsWhenTheOnlyIndexCannotAnswer(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("QMD_CONFIG_DIR", dir)
+	db := filepath.Join(dir, "plain.sqlite")
+	if err := os.WriteFile(filepath.Join(dir, "plain.yml"),
+		[]byte("db_path: "+db+"\ncollections: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.NewStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	// A document, no vector table (never embedded), and a broken full-text index.
+	now := time.Now()
+	hash := store.HashContent("plain")
+	if err := st.InsertContent(hash, "plain body", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.InsertDocument("c", "a.md", "a", hash, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.DB.Exec(`DROP TABLE documents_fts; CREATE TABLE documents_fts(x)`); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.LoadConfigFor("plain")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = runHybrid([]indexSource{{Name: "plain", Store: st, Cfg: cfg}}, "anything", 5, "", 0)
+	if err == nil {
+		t.Fatal("a query where nothing could answer reported success")
+	}
+	if !strings.Contains(err.Error(), "documents_fts") {
+		t.Errorf("error does not name the failure: %v", err)
+	}
+}
+
+func TestResolveSourcesRefusesADirectoryOfUnbuiltIndexes(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("QMD_CONFIG_DIR", dir)
+	for _, name := range []string{"a", "b"} {
+		yml := "db_path: " + filepath.Join(dir, name+".sqlite") + "\ncollections: {}\n"
+		if err := os.WriteFile(filepath.Join(dir, name+".yml"), []byte(yml), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := resolveSources(); err == nil {
+		t.Fatal("two unbuilt indexes resolved to a working source set")
+	}
+}

@@ -42,9 +42,11 @@ anywhere, and only the default name is special.
   index in the directory with its database and collections, because listing is
   its job. `search`, `vsearch`, `query` and `qmd mcp` read or serve every index
   when no `--index` is given, merging by rank; `get` and `multi-get` resolve a
-  path in whichever index holds it. An index that fails while others answer
-  warns and the rest still answer; an index whose database was never built is
-  skipped, or named when it is the only one. `status` and `cleanup` act on one
+  path in whichever index holds it. An index whose *search* fails while others
+  answer warns and the rest still answer; an index whose database cannot be
+  opened, or whose vectors came from another model, fails the command. An index
+  whose database was never built is skipped, or named when it is the only one;
+  when none is built, the command says so. `status` and `cleanup` act on one
   index, so they exit nonzero with a one-line hint naming the choices. Writers
   (`collection add`, `context`) still create the file.
 - A **collection** is a directory tree inside one index.
