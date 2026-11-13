@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 	"runtime/debug"
-	"strings"
+	"time"
 
 	"github.com/ba0f3/qmd-go/internal/config"
 	"github.com/ba0f3/qmd-go/internal/llm"
@@ -18,37 +18,43 @@ const version = "1.0.0"
 // --version` and `qmd version` print it, because the CLI's file formats change
 // between builds and an installed binary is not visibly one version or another.
 func versionString() string {
-	build := "API backend only (Ollama/OpenAI)"
+	backend := "API backend only (Ollama/OpenAI)"
 	if llm.GGUFEnabled() {
-		build = "GGUF support enabled"
+		backend = "GGUF support enabled"
 	}
-	v := version
-	if rev := buildRevision(); rev != "" {
-		v += " (" + rev + ")"
+	// Commit time first: a person comparing two builds wants to know which is
+	// newer, and a hash does not say that. The hash follows for cross-reference.
+	stamp := backend
+	if rev, when := buildIdentity(); rev != "" {
+		stamp = when.Format("2006-01-02 15:04Z") + " (" + rev + "), " + backend
 	}
 	return fmt.Sprintf("qmd version %s\nBuild: %s\nDefault embed model: %s\n",
-		v, build, llm.DefaultEmbedModel())
+		version, stamp, llm.DefaultEmbedModel())
 }
 
-// buildRevision is the VCS revision Go recorded at build time, abbreviated, with
-// a marker for uncommitted changes. A version number alone cannot tell two
-// builds of this CLI apart, and the file formats move between builds.
-func buildRevision() string {
+// buildIdentity reports the commit the binary was built from and when it was
+// committed, as Go recorded them at build time. A version number alone cannot
+// tell two builds of this CLI apart, and the file formats move between builds.
+func buildIdentity() (string, time.Time) {
 	info, ok := debug.ReadBuildInfo()
 	if !ok {
-		return ""
+		return "", time.Time{}
 	}
-	rev, dirty := "", false
+	rev, when, dirty := "", time.Time{}, false
 	for _, s := range info.Settings {
 		switch s.Key {
 		case "vcs.revision":
 			rev = s.Value
+		case "vcs.time":
+			if t, err := time.Parse(time.RFC3339, s.Value); err == nil {
+				when = t.UTC()
+			}
 		case "vcs.modified":
 			dirty = s.Value == "true"
 		}
 	}
 	if rev == "" {
-		return ""
+		return "", time.Time{}
 	}
 	if len(rev) > 7 {
 		rev = rev[:7]
@@ -56,7 +62,7 @@ func buildRevision() string {
 	if dirty {
 		rev += "+dirty"
 	}
-	return rev
+	return rev, when
 }
 
 var rootCmd = &cobra.Command{
@@ -105,13 +111,6 @@ func initRoot() {
 func requireIndex() {
 	if _, err := config.LoadIndexConfig(getIndexName()); err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		// Only the default can be guessed at: an explicit --index the user
-		// typed is their business, and suggesting another would be noise.
-		if !rootCmd.PersistentFlags().Changed("index") {
-			if names, err := config.IndexNames(); err == nil && len(names) > 0 {
-				fmt.Fprintf(os.Stderr, "try: qmd --index %s %s\n", names[0], strings.Join(os.Args[1:], " "))
-			}
-		}
 		os.Exit(1)
 	}
 }

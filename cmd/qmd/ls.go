@@ -3,17 +3,68 @@ package main
 import (
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/ba0f3/qmd-go/internal/config"
+	"github.com/ba0f3/qmd-go/internal/store"
 	"github.com/spf13/cobra"
 )
+
+// printIndexes lists every index in the config directory with its database and
+// collections, which is what `qmd ls` means when there is no default index.
+func printIndexes(names []string) {
+	dir, _ := config.GetConfigDir()
+	fmt.Printf("Indexes in %s:\n", dir)
+	for _, name := range names {
+		dbPath, err := config.DBPathFor(name)
+		if err != nil {
+			fmt.Printf("\n  %s  (no database path: %v)\n", name, err)
+			continue
+		}
+		fmt.Printf("\n  %s  %s\n", name, dbPath)
+		cfg, err := config.LoadConfigFor(name)
+		if err != nil {
+			fmt.Printf("    cannot read config: %v\n", err)
+			continue
+		}
+		if len(cfg.Collections) == 0 {
+			fmt.Println("    no collections")
+			continue
+		}
+		s, err := store.NewStore(dbPath)
+		if err != nil {
+			fmt.Printf("    cannot open database: %v\n", err)
+			continue
+		}
+		collections := make([]string, 0, len(cfg.Collections))
+		for c := range cfg.Collections {
+			collections = append(collections, c)
+		}
+		sort.Strings(collections)
+		for _, c := range collections {
+			var n int
+			_ = s.DB.QueryRow(`SELECT COUNT(*) FROM documents WHERE collection = ? AND active = 1`, c).Scan(&n)
+			fmt.Printf("    qmd://%s/  (%d files)\n", c, n)
+		}
+		_ = s.Close()
+	}
+}
 
 var lsCmd = &cobra.Command{
 	Use:   "ls [collection[/path]]",
 	Short: "List collections or files in a collection",
 	Run: func(cmd *cobra.Command, args []string) {
 		initRoot()
+		// With several indexes and no --index, the useful answer is the list of
+		// them. Refusing to run and asking for a flag is what `ls` should not
+		// do, since listing is its whole job.
+		if len(args) == 0 && !rootCmd.PersistentFlags().Changed("index") && !config.HasIndexConfig("index") {
+			if names, err := config.IndexNames(); err == nil && len(names) > 0 {
+				printIndexes(names)
+				return
+			}
+		}
 		requireIndex()
 		s, err := openStore()
 		if err != nil {

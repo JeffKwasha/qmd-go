@@ -136,10 +136,24 @@ func LoadIndexConfig(indexName string) (*Config, error) {
 		if len(names) == 0 {
 			return &Config{Collections: make(map[string]Collection)}, nil
 		}
-		return nil, fmt.Errorf("no index named %q: %s does not exist\nindexes in %s: %s",
-			indexName, path, dir, strings.Join(names, ", "))
+		return nil, fmt.Errorf("no %s.yml in %s; choose --index %s",
+			indexName, dir, strings.Join(names, " or --index "))
 	}
 	return loadConfigFile(path)
+}
+
+// HasIndexConfig reports whether <name>.yml exists in the config dir, without
+// treating its absence as an error.
+func HasIndexConfig(indexName string) bool {
+	if indexName == "" {
+		indexName = "index"
+	}
+	dir, err := GetConfigDir()
+	if err != nil {
+		return false
+	}
+	_, err = os.Stat(filepath.Join(dir, indexName+".yml"))
+	return err == nil
 }
 
 // LoadConfigFor loads the collection config for a named index without

@@ -33,12 +33,14 @@ anywhere, and only the default name is special.
 
 - An **index** is a SQLite file holding documents, the FTS table, and vectors.
   The default index is `index`. Named indexes are selected with `qmd --index <name>`.
-  Read commands (`ls`, `status`, `search`, `vsearch`, `query`, `get`, `multi-get`,
-  `cleanup`, `mcp`) resolve the index config first: when the directory holds
-  other `<name>.yml` files and the requested one is missing, they exit nonzero
-  and name the file and the indexes that do exist, instead of reporting "no
-  collections" and creating an empty database. Writers (`collection add`) still
-  create the file.
+  Read commands resolve the index config before opening a store, so a name with
+  no `<name>.yml` cannot report "no collections" while an empty database is
+  created behind it. `qmd ls` with no `--index` and no `index.yml` lists every
+  index in the directory with its database and collections, because listing is
+  its job. The commands that can only act on one index (`search`, `get`,
+  `vsearch`, `query`, `status`, `cleanup`, `mcp`) exit nonzero with a one-line
+  hint naming the indexes to choose from. Writers (`collection add`, `context`)
+  still create the file.
 - A **collection** is a directory tree inside one index.
 - A **mount** is a URL path served by the HTTP server, pointing at one index.
   Several mounts may point at the same index, for example `/mcp` as an alias of
@@ -442,6 +444,6 @@ whoever can read that file reads the private index directly:
 | Server exits on startup, "no servers defined" | `CONFIG.yml` has no `servers:` map |
 | Server exits on startup, a mount "points at index ... which has no config" | The mount names an index with no `<name>.yml`; fix the name or create the index |
 | Server exits on startup, "no such file or directory" | `CONFIG.yml` is missing |
-| `no index named "index": .../index.yml does not exist` | Ran without `--index` in a directory whose indexes have other names; the default is `index`. The next line lists them and prints the command to run |
+| `no index.yml in ...; choose --index a or --index b` | Ran without `--index` in a directory whose indexes have other names; the default is `index` |
 | Every path returns `401` including one you expected public | `public:` entries are matched exactly, check the leading slash |
 | Slow first search | Embedding model cold start, not auth |
