@@ -28,7 +28,7 @@ func TestLoadIndexConfigRefusesMissingIndex(t *testing.T) {
 	if err == nil {
 		t.Fatal("missing default index accepted while public.yml exists")
 	}
-	for _, want := range []string{filepath.Join(dir, "index.yml"), "public", "--index"} {
+	for _, want := range []string{`"index"`, filepath.Join(dir, "index.yml"), "public"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error does not mention %q: %v", want, err)
 		}

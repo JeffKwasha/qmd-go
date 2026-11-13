@@ -136,8 +136,8 @@ func LoadIndexConfig(indexName string) (*Config, error) {
 		if len(names) == 0 {
 			return &Config{Collections: make(map[string]Collection)}, nil
 		}
-		return nil, fmt.Errorf("no index config at %s; indexes here: %s (use --index <name>)",
-			path, strings.Join(names, ", "))
+		return nil, fmt.Errorf("no index named %q: %s does not exist\nindexes in %s: %s",
+			indexName, path, dir, strings.Join(names, ", "))
 	}
 	return loadConfigFile(path)
 }

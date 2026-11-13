@@ -442,6 +442,6 @@ whoever can read that file reads the private index directly:
 | Server exits on startup, "no servers defined" | `CONFIG.yml` has no `servers:` map |
 | Server exits on startup, a mount "points at index ... which has no config" | The mount names an index with no `<name>.yml`; fix the name or create the index |
 | Server exits on startup, "no such file or directory" | `CONFIG.yml` is missing |
-| `no index config at .../index.yml; indexes here: ...` | Ran without `--index` in a directory whose indexes have other names; the default is `index` |
+| `no index named "index": .../index.yml does not exist` | Ran without `--index` in a directory whose indexes have other names; the default is `index`. The next line lists them and prints the command to run |
 | Every path returns `401` including one you expected public | `public:` entries are matched exactly, check the leading slash |
 | Slow first search | Embedding model cold start, not auth |
