@@ -542,3 +542,66 @@ func TestResolveSourcesRefusesADirectoryOfUnbuiltIndexes(t *testing.T) {
 		t.Fatal("two unbuilt indexes resolved to a working source set")
 	}
 }
+
+func TestRunHybridReportsEveryFailure(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("QMD_CONFIG_DIR", dir)
+	broken := func(name string) indexSource {
+		db := filepath.Join(dir, name+".sqlite")
+		if err := os.WriteFile(filepath.Join(dir, name+".yml"),
+			[]byte("db_path: "+db+"\ncollections: {}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		st, err := store.NewStore(db)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = st.Close() })
+		if _, err := st.DB.Exec(`DROP TABLE documents_fts; CREATE TABLE documents_fts(x)`); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := config.LoadConfigFor(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return indexSource{Name: name, Store: st, Cfg: cfg}
+	}
+	one, two := broken("one"), broken("two")
+
+	_, err := runHybrid([]indexSource{one, two}, "anything", 5, "", 0)
+	if err == nil {
+		t.Fatal("two broken indexes reported success")
+	}
+	for _, name := range []string{`"one"`, `"two"`} {
+		if !strings.Contains(err.Error(), name) {
+			t.Errorf("error does not mention index %s: %v", name, err)
+		}
+	}
+}
+
+func TestResolveSourcesSkipsUnbuiltButKeepsBuilt(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("QMD_CONFIG_DIR", dir)
+	built := filepath.Join(dir, "built.sqlite")
+	st, err := store.NewStore(built)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for name, db := range map[string]string{"built": built, "unbuilt": filepath.Join(dir, "unbuilt.sqlite")} {
+		yml := "db_path: " + db + "\ncollections: {}\n"
+		if err := os.WriteFile(filepath.Join(dir, name+".yml"), []byte(yml), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sources, err := resolveSources()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sources) != 1 || sources[0].Name != "built" {
+		t.Fatalf("sources = %v, want only [built]", sources)
+	}
+	closeSources(sources)
+}
