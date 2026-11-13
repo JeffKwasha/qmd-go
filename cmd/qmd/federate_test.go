@@ -1,6 +1,9 @@
 package main
 
 import (
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -109,5 +112,82 @@ auth:
 	got := reachableIndexes(other, "hr-key")
 	if len(got) != 1 || got[0] != "public" {
 		t.Errorf("limited key indexes = %v, want [public]", got)
+	}
+}
+
+func TestCatchAllMountSearchesGrantsOnly(t *testing.T) {
+	body := `servers:
+  /mcp: all
+  /mcp/private: private
+auth:
+  public: [/mcp]
+  groups:
+    holder:
+      allow: [/mcp, /mcp/private]
+  keys:
+    - hash: "` + hashKey("holder-key") + `"
+      group: holder
+`
+	sc := parseYAML(t, body)
+
+	if got := indexesForMount(sc, "/mcp", ""); len(got) != 0 {
+		t.Errorf("anonymous catchall = %v, want nothing (no public index mount)", got)
+	}
+	if got := indexesForMount(sc, "/mcp", "holder-key"); len(got) != 1 || got[0] != "private" {
+		t.Errorf("keyed catchall = %v, want [private]", got)
+	}
+	if got := indexesForMount(sc, "/mcp/private", "holder-key"); len(got) != 1 || got[0] != "private" {
+		t.Errorf("specific mount = %v, want [private]", got)
+	}
+}
+
+func TestCatchAllMountStatusCodes(t *testing.T) {
+	body := `servers:
+  /mcp: all
+  /mcp/private: private
+auth:
+  public: [/mcp]
+  groups:
+    holder:
+      allow: [/mcp, /mcp/private]
+  keys:
+    - hash: "` + hashKey("live") + `"
+      group: holder
+    - hash: "` + hashKey("stale") + `"
+      group: holder
+      expires: 2020-01-01
+`
+	sc := parseYAML(t, body)
+	ok := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	h := authMiddleware(staticAuthState(sc), ok)
+
+	call := func(path, key string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, path, nil)
+		if key != "" {
+			req.Header.Set("Authorization", "Bearer "+key)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+
+	if rec := call("/mcp", ""); rec.Code != http.StatusForbidden {
+		t.Errorf("anonymous catchall with no public index = %d, want 403", rec.Code)
+	}
+	if rec := call("/mcp/private", ""); rec.Code != http.StatusUnauthorized {
+		t.Errorf("anonymous private mount = %d, want 401", rec.Code)
+	}
+	rec := call("/mcp/private", "stale")
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expired key = %d, want 401", rec.Code)
+	}
+	if got := rec.Header().Get("WWW-Authenticate"); !strings.Contains(got, "expired") {
+		t.Errorf("expired key challenge = %q, want it to say the key expired", got)
+	}
+	if rec := call("/mcp", "live"); rec.Code != http.StatusOK {
+		t.Errorf("keyed catchall = %d, want 200", rec.Code)
+	}
+	if rec := call("/mcp/private", "live"); rec.Code != http.StatusOK {
+		t.Errorf("keyed specific mount = %d, want 200", rec.Code)
 	}
 }

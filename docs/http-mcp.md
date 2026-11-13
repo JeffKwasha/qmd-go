@@ -119,34 +119,46 @@ ExecStart=/mnt/pool/tools/bin/qmd embed
 
 ## What one request searches
 
-A mount points at one index, but a request answers from every index the caller
-may reach:
-
-- an anonymous caller gets the indexes of the mounts listed in `auth.public`;
-- a caller with a live key gets those public indexes plus the indexes behind the
-  paths its group's `allow` names.
-
-So a client asks once and gets every database it was granted, without knowing
-which index holds what:
+A mount names one index, except a catchall mount, written `all`:
 
 ```yaml
 servers:
-  /mcp: public
-  /mcp/pub: public
+  /mcp: all           # everything this caller may reach
+  /mcp/pub: public    # this index only
   /mcp/private: private
 
 auth:
-  public: [/mcp, /mcp/pub]        # anonymous: the public index only
+  public: [/mcp/pub]
   groups:
     hermes-private:
-      allow: [/mcp, /mcp/private] # with this key: public + private
+      allow: [/mcp, /mcp/private]
 ```
 
-An anonymous request to `/mcp` searches `public` only. The same URL with a key
-of that group searches both. A key never reaches an index its group was not
-granted, and `/mcp/private` still answers `401` without a key.
+- `all` answers from every index the caller may reach: the indexes of the mounts
+  in `auth.public`, plus the indexes behind the paths its key's group allows.
+- A mount naming an index answers from that index only, so `/mcp/private` never
+  returns a `/mcp/pub` result.
 
-Merging is by **rank**, never by score:
+`all` is a keyword, not a pattern. An index is covered because a mount exposing
+it is granted to the caller, not because its name matches anything; a new index
+joins the catchall as soon as some mount shows it to that caller. There is no
+name matching, so `/mcp: pub*` means an index literally called `pub*`.
+
+Status codes:
+
+| situation | answer |
+|---|---|
+| path not mounted | `404` |
+| missing, unknown or expired key on a keyed mount | `401`, and the `WWW-Authenticate` challenge says `key expired` when that is the reason |
+| credential accepted for the mount, but no index behind it is readable with it | `403` |
+
+A catchall with nothing reachable is therefore `403`, never an empty `200`: an
+empty answer must mean "nothing matched", not "nothing was allowed". A catchall
+only has what the other mounts grant — with `public: [/mcp]` alone and no public
+index mount, an anonymous client gets `403`, so give it one (`/mcp/pub: public`)
+or expect a key. A config in which every mount is `all` is refused at startup.
+
+Results merge by **rank**, never by score:
 
 - BM25 scores depend on the corpus of the index that produced them, so a 12 in
   one index and a 7 in another say nothing about their order.
@@ -163,6 +175,7 @@ scores, so nothing changes for a single-index setup.
 The CLI does the same thing by directory: with no `--index` and no `index.yml`,
 `search`, `vsearch`, `query`, `get` and `multi-get` read every index there.
 
+## The key file
 ## The key file
 ## The key file
 

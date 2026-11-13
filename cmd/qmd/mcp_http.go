@@ -414,8 +414,13 @@ func validateMountIndexes(sc *serverConfig, path string) error {
 		mounts = append(mounts, p)
 	}
 	sort.Strings(mounts)
+	indexMounts := 0
 	for _, p := range mounts {
 		name := sc.Servers[p]
+		if name == allIndexes {
+			continue
+		}
+		indexMounts++
 		if name == "" {
 			name = "index"
 		}
@@ -424,6 +429,10 @@ func validateMountIndexes(sc *serverConfig, path string) error {
 			return fmt.Errorf("server config %s: mount %s points at index %q, which has no config at %s",
 				path, p, name, cfgPath)
 		}
+	}
+	if indexMounts == 0 {
+		return fmt.Errorf("server config %s: every mount is catchall (%q); name at least one index, or a catchall has nothing to search",
+			path, allIndexes)
 	}
 	return nil
 }
@@ -454,16 +463,36 @@ func isPublic(sc *serverConfig, path string) bool {
 	return false
 }
 
+// allIndexes is the mount value of a catchall endpoint: it answers from every
+// index the caller may reach. A mount that names an index answers from that
+// index only, so /mcp/private never leaks a result from /mcp/public. The word is
+// a keyword, not a pattern: only the caller's grants decide what it covers, so
+// a new index joins it because its mount is granted, not because its name
+// matches anything.
+const allIndexes = "all"
+
+// indexesForMount is what one request searches. A specific mount searches its
+// own index; a catchall mount searches everything this caller was granted,
+// which is what /mcp is for.
+func indexesForMount(sc *serverConfig, path, key string) []string {
+	own := sc.Servers[normalizePath(path)]
+	if own == "" {
+		own = "index"
+	}
+	if own != allIndexes {
+		return []string{own}
+	}
+	return reachableIndexes(sc, key)
+}
+
 // reachableIndexes is the set of indexes one caller may search: the indexes of
 // every public mount, plus the indexes of the mounts its key's group allows.
-// A federated answer is built from this set, so access is decided per caller
-// rather than per mount: an anonymous request to a mount that also names a
-// private index still sees only the public indexes.
+// Catchall mounts contribute nothing here: they are a view, not an index.
 func reachableIndexes(sc *serverConfig, key string) []string {
 	seen := make(map[string]bool)
 	add := func(path string) {
 		name, ok := sc.Servers[normalizePath(path)]
-		if !ok {
+		if !ok || name == allIndexes {
 			return
 		}
 		if name == "" {
@@ -676,27 +705,43 @@ func authMiddleware(state *authState, next http.Handler) http.Handler {
 			http.NotFound(w, r)
 			return
 		}
-		if isPublic(sc, path) {
-			// A public path needs no key, but a valid key still widens the
-			// answer to the indexes it was granted: that is what "search every
-			// database my key allows" means when the endpoint is also public.
-			indexes := reachableIndexes(sc, "")
-			if key := bearerToken(r); key != "" {
-				if e, ok := sc.lookup(key); ok && !e.expired(time.Now()) {
-					indexes = reachableIndexes(sc, key)
-				}
+		serve := func(key string) {
+			indexes := indexesForMount(sc, path, key)
+			if len(indexes) == 0 {
+				// The credential is valid for this mount, but nothing behind it
+				// is readable with this credential. That is a scope problem, not
+				// a bad key, and an empty 200 would hide it.
+				log.Printf("qmd mcp auth: deny %s key=%s %s from %s: no reachable index",
+					r.Method, keyFingerprint(key), path, r.RemoteAddr)
+				http.Error(w, "forbidden: no indexes are reachable with this credential", http.StatusForbidden)
+				return
 			}
 			next.ServeHTTP(w, withIndexSet(r, indexes))
+		}
+		if isPublic(sc, path) {
+			// A public path needs no key, but a valid key still widens a
+			// catchall answer to the indexes it was granted.
+			key := bearerToken(r)
+			if e, ok := sc.lookup(key); !ok || e.expired(time.Now()) {
+				key = ""
+			}
+			serve(key)
 			return
 		}
 		key := bearerToken(r)
 		if keyAllows(sc, key, path) {
 			log.Printf("qmd mcp auth: allow %s key=%s %s", r.Method, keyFingerprint(key), path)
-			next.ServeHTTP(w, withIndexSet(r, reachableIndexes(sc, key)))
+			serve(key)
 			return
 		}
 		log.Printf("qmd mcp auth: deny %s key=%s %s from %s", r.Method, keyFingerprint(key), path, r.RemoteAddr)
-		w.Header().Set("WWW-Authenticate", `Bearer realm="qmd"`)
+		// RFC 6750 lets the challenge say why, so a client can tell an expired
+		// key from an unknown one instead of guessing.
+		if e, ok := sc.lookup(key); ok && e.expired(time.Now()) {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="qmd", error="invalid_token", error_description="key expired"`)
+		} else {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="qmd"`)
+		}
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 	})
 }
@@ -748,6 +793,9 @@ func runMCPHTTP(addr, serverCfgPath string) error {
 		return nil
 	}
 	for _, name := range sc.Servers {
+		if name == allIndexes {
+			continue
+		}
 		if name == "" {
 			name = "index"
 		}
@@ -787,7 +835,7 @@ func runMCPHTTP(addr, serverCfgPath string) error {
 		h := mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
 			indexes := indexesFromRequest(r)
 			if len(indexes) == 0 {
-				indexes = []string{own}
+				indexes = indexesForMount(sc, p, "")
 			}
 			return serverFor(indexes)
 		}, &mcp.StreamableHTTPOptions{Stateless: true})
