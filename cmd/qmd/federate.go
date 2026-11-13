@@ -11,7 +11,9 @@ package main
 // or more lists to fuse.
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"sort"
 	"strings"
@@ -119,13 +121,16 @@ func openSources(names []string) ([]indexSource, error) {
 			closeSources(out)
 			return nil, err
 		}
-		if _, err := os.Stat(dbPath); err != nil {
+		if _, err := os.Stat(dbPath); errors.Is(err, fs.ErrNotExist) {
 			if len(names) == 1 {
 				closeSources(out)
 				return nil, fmt.Errorf("index %q (%s): not built; run qmd update", name, dbPath)
 			}
 			fmt.Fprintf(os.Stderr, "qmd: index %q is not built; run qmd update\n", name)
 			continue
+		} else if err != nil {
+			closeSources(out)
+			return nil, fmt.Errorf("index %q (%s): %w", name, dbPath, err)
 		}
 		s, err := store.NewStore(dbPath)
 		if err != nil {
@@ -243,13 +248,11 @@ func vecHit(src indexSource, r store.VecSearchResult) fusedHit {
 // runFTS searches every source's full text and fuses the lists.
 func runFTS(sources []indexSource, query string, limit int, collection string, minScore float64) ([]fusedHit, error) {
 	var lists [][]fusedHit
-	var firstErr error
+	var errs []error
 	for _, src := range sources {
 		results, err := src.Store.SearchFTS(query, limit, collection)
 		if err != nil {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("index %q: %w", src.Name, err)
-			}
+			errs = append(errs, fmt.Errorf("index %q: %w", src.Name, err))
 			continue
 		}
 		list := make([]fusedHit, 0, len(results))
@@ -261,11 +264,11 @@ func runFTS(sources []indexSource, query string, limit int, collection string, m
 		}
 		lists = append(lists, list)
 	}
-	if firstErr != nil {
-		if len(lists) == 0 {
-			return nil, firstErr
-		}
-		fmt.Fprintf(os.Stderr, "qmd: %v\n", firstErr)
+	if len(lists) == 0 && len(errs) > 0 {
+		return nil, errs[0]
+	}
+	for _, err := range errs {
+		fmt.Fprintf(os.Stderr, "qmd: %v\n", err)
 	}
 	return fuseLists(lists), nil
 }
@@ -275,7 +278,7 @@ func runFTS(sources []indexSource, query string, limit int, collection string, m
 // compare, the scores would not.
 func runVectors(sources []indexSource, query string, limit int, minScore float64, collection string) ([]fusedHit, error) {
 	var lists [][]fusedHit
-	var firstErr error
+	var errs []error
 	for _, src := range sources {
 		if !src.hasVectors() {
 			continue
@@ -285,23 +288,17 @@ func runVectors(sources []indexSource, query string, limit int, minScore float64
 		}
 		client, err := llm.NewEmbedClient(config.EmbedModel(src.Cfg))
 		if err != nil {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("index %q: %w", src.Name, err)
-			}
+			errs = append(errs, fmt.Errorf("index %q: %w", src.Name, err))
 			continue
 		}
 		emb, err := client.Embed(formatQueryForEmbedding(query))
 		if err != nil {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("index %q: %w", src.Name, err)
-			}
+			errs = append(errs, fmt.Errorf("index %q: %w", src.Name, err))
 			continue
 		}
-		results, err := src.Store.SearchVectorsBrute(emb.Embedding, limit)
+		results, err := src.Store.SearchVectorsBrute(emb.Embedding, limit, collection)
 		if err != nil {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("index %q: %w", src.Name, err)
-			}
+			errs = append(errs, fmt.Errorf("index %q: %w", src.Name, err))
 			continue
 		}
 		// One document may contribute several chunks; the best-placed chunk is
@@ -321,11 +318,11 @@ func runVectors(sources []indexSource, query string, limit int, minScore float64
 		}
 		lists = append(lists, list)
 	}
-	if firstErr != nil {
-		if len(lists) == 0 {
-			return nil, firstErr
-		}
-		fmt.Fprintf(os.Stderr, "qmd: %v\n", firstErr)
+	if len(lists) == 0 && len(errs) > 0 {
+		return nil, errs[0]
+	}
+	for _, err := range errs {
+		fmt.Fprintf(os.Stderr, "qmd: %v\n", err)
 	}
 	return fuseLists(lists), nil
 }
@@ -336,6 +333,7 @@ func runVectors(sources []indexSource, query string, limit int, minScore float64
 func runHybrid(sources []indexSource, query string, limit int, collection string, minScore float64) ([]fusedHit, error) {
 	var lists [][]fusedHit
 	var errs []error
+	answered := false
 	for _, src := range sources {
 		if src.hasVectors() {
 			if err := checkModel(src); err != nil {
@@ -345,18 +343,21 @@ func runHybrid(sources []indexSource, query string, limit int, collection string
 		one := []indexSource{src}
 		fts, ftsErr := runFTS(one, query, limit, collection, minScore)
 		vec, vecErr := runVectors(one, query, limit, minScore, collection)
-		combined := fuseLists([][]fusedHit{fts, vec})
-		if len(combined) == 0 {
-			if ftsErr != nil {
-				errs = append(errs, ftsErr)
-			} else if vecErr != nil {
-				errs = append(errs, vecErr)
-			}
+		// An index that produced a list answered, even if that list is empty:
+		// "no match here" is an answer, and must not be reported as a failure.
+		if ftsErr == nil || vecErr == nil {
+			answered = true
 		}
-		lists = append(lists, combined)
+		if ftsErr != nil {
+			errs = append(errs, ftsErr)
+		}
+		if vecErr != nil {
+			errs = append(errs, vecErr)
+		}
+		lists = append(lists, fuseLists([][]fusedHit{fts, vec}))
 	}
 	out := fuseLists(lists)
-	if len(out) == 0 && len(errs) > 0 {
+	if len(out) == 0 && len(errs) > 0 && !answered {
 		return nil, errs[0]
 	}
 	for _, err := range errs {

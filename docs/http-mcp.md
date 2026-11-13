@@ -24,8 +24,11 @@ Two files matter, and they are separate on purpose:
 
 The server file is upper case so a listing puts it above the indexes: `C` sorts
 below every lower-case letter both in byte order and at the primary collation
-level. Index discovery skips it by name, and refuses a server config left under
-the old name `server.yml` rather than walking it as an index called `server`.
+level. Index discovery skips it by name. A file named `server.yml` that holds
+`collections:` is an index legitimately called `server`; one that holds
+`servers:` is refused, because walking it would serve mounts and keys as if they
+were collections.
+
 The path is configurable: `--server-config` or `$QMD_SERVER_CONFIG` may point
 anywhere, and only the default name is special.
 
@@ -37,10 +40,13 @@ anywhere, and only the default name is special.
   no `<name>.yml` cannot report "no collections" while an empty database is
   created behind it. `qmd ls` with no `--index` and no `index.yml` lists every
   index in the directory with its database and collections, because listing is
-  its job. `search`, `vsearch`, `query`, `get` and `multi-get` read every index
-  when no `--index` is given, and merge by rank. `status` and `cleanup` act on
-  one index, so they exit nonzero with a one-line hint naming the choices.
-  Writers (`collection add`, `context`) still create the file.
+  its job. `search`, `vsearch`, `query` and `qmd mcp` read or serve every index
+  when no `--index` is given, merging by rank; `get` and `multi-get` resolve a
+  path in whichever index holds it. An index that fails while others answer
+  warns and the rest still answer; an index whose database was never built is
+  skipped, or named when it is the only one. `status` and `cleanup` act on one
+  index, so they exit nonzero with a one-line hint naming the choices. Writers
+  (`collection add`, `context`) still create the file.
 - A **collection** is a directory tree inside one index.
 - A **mount** is a URL path served by the HTTP server, pointing at one index.
   Several mounts may point at the same index, for example `/mcp` as an alias of

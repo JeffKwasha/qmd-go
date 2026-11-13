@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ba0f3/qmd-go/internal/config"
 	"github.com/ba0f3/qmd-go/internal/store"
 )
 
@@ -351,6 +352,140 @@ auth:
 		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
 		if rec.Code != want {
 			t.Errorf("%s = %d, want %d", path, rec.Code, want)
+		}
+	}
+}
+
+func vectorIndex(t *testing.T, dir, name string, docs []struct {
+	collection, path string
+	vec              []float32
+}) indexSource {
+	t.Helper()
+	db := filepath.Join(dir, name+".sqlite")
+	yml := "db_path: " + db + "\nembed_model: model\ncollections: {}\n"
+	if err := os.WriteFile(filepath.Join(dir, name+".yml"), []byte(yml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.NewStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := st.EnsureEmbeddingBlobTable(); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	for i, d := range docs {
+		hash := store.HashContent(d.path)
+		if err := st.InsertContent(hash, "body "+d.path, now); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.InsertDocument(d.collection, d.path, d.path, hash, now, now); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.InsertEmbedding(hash, i, 0, d.vec, "model", now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg, err := config.LoadConfigFor(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return indexSource{Name: name, Store: st, Cfg: cfg}
+}
+
+func TestRunVectorsFiltersCollectionBeforeLimit(t *testing.T) {
+	fakeEmbedBackend(t)
+	dir := t.TempDir()
+	t.Setenv("QMD_CONFIG_DIR", dir)
+	// Two docs of "hot" score exactly 1.0 and rank above the "cold" ones.
+	docs := []struct {
+		collection, path string
+		vec              []float32
+	}{
+		{"hot", "hot/one.md", []float32{1, 0}},
+		{"hot", "hot/two.md", []float32{1, 0}},
+		{"cold", "cold/one.md", []float32{0.9, 0.43589}},
+		{"cold", "cold/two.md", []float32{0.9, 0.43589}},
+	}
+	src := vectorIndex(t, dir, "v", docs)
+	hits, err := runVectors([]indexSource{src}, "query", 2, 0, "cold")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 2 {
+		t.Fatalf("got %d hits, want the 2 cold ones: %+v", len(hits), hits)
+	}
+	for _, h := range hits {
+		if h.Collection != "cold" {
+			t.Errorf("collection filter returned %+v", h)
+		}
+	}
+}
+
+func TestRunHybridNoMatchIsNotAFailureWhenAnIndexIsBroken(t *testing.T) {
+	fakeEmbedBackend(t)
+	dir := t.TempDir()
+	t.Setenv("QMD_CONFIG_DIR", dir)
+	good := vectorIndex(t, dir, "good", nil)
+	bad := vectorIndex(t, dir, "bad", nil)
+	if _, err := bad.Store.DB.Exec(`DROP TABLE documents_fts; CREATE TABLE documents_fts(x)`); err != nil {
+		t.Fatal(err)
+	}
+
+	hits, err := runHybrid([]indexSource{good, bad}, "zzznomatch", 5, "", 0)
+	if err != nil {
+		t.Fatalf("a no-match query failed because another index is broken: %v", err)
+	}
+	if len(hits) != 0 {
+		t.Fatalf("got hits for a no-match query: %+v", hits)
+	}
+}
+
+func TestMultiGetGlobCarriesIndex(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("QMD_CONFIG_DIR", dir)
+	now := time.Now()
+	mk := func(name, collection, docPath string) indexSource {
+		db := filepath.Join(dir, name+".sqlite")
+		if err := os.WriteFile(filepath.Join(dir, name+".yml"),
+			[]byte("db_path: "+db+"\ncollections: {}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		st, err := store.NewStore(db)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = st.Close() })
+		hash := store.HashContent(docPath)
+		if err := st.InsertContent(hash, "body", now); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.InsertDocument(collection, docPath, docPath, hash, now, now); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := config.LoadConfigFor(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return indexSource{Name: name, Store: st, Cfg: cfg}
+	}
+	a := mk("alpha", "notes", "x.md")
+	b := mk("beta", "notes", "x.md")
+
+	var docs []docForMultiGet
+	for _, src := range []indexSource{a, b} {
+		docs = append(docs, multiGetByGlob(src, "*/*.md", 0, 1<<20)...)
+	}
+	if len(docs) != 2 {
+		t.Fatalf("got %d docs", len(docs))
+	}
+	for _, d := range docs {
+		if d.Index == "" {
+			t.Errorf("glob result lost its index: %+v", d)
+		}
+		if !strings.HasPrefix(d.label(), d.Index+":qmd://") {
+			t.Errorf("label = %q, want the index prefix", d.label())
 		}
 	}
 }

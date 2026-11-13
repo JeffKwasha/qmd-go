@@ -46,15 +46,17 @@ var multiGetCmd = &cobra.Command{
 			os.Exit(1)
 		}
 		defer closeSources(sources)
-		sources, pattern = indexPrefix(sources, pattern)
 
 		var docs []docForMultiGet
 		federated := len(sources) > 1
 		if strings.Contains(pattern, ",") && !strings.Contains(pattern, "*") && !strings.Contains(pattern, "?") {
+			// Each name decides its own index; narrowing the whole pattern would
+			// drop every name that belongs elsewhere.
 			docs = multiGetByList(sources, strings.Split(pattern, ","), maxLines, maxBytes)
 		} else {
-			for _, src := range sources {
-				docs = append(docs, multiGetByGlob(src, pattern, maxLines, maxBytes)...)
+			narrowed, globPattern := indexPrefix(sources, pattern)
+			for _, src := range narrowed {
+				docs = append(docs, multiGetByGlob(src, globPattern, maxLines, maxBytes)...)
 			}
 		}
 		if !federated {
@@ -283,6 +285,7 @@ func multiGetByGlob(src indexSource, pattern string, maxLines, maxBytes int) []d
 			body = ""
 		}
 		out = append(out, docForMultiGet{
+			Index:       src.Name,
 			DisplayPath: p.Filepath,
 			Title:       title,
 			Body:        body,

@@ -108,6 +108,15 @@ func WriteFileAtomic(path string, data []byte, mode os.FileMode) error {
 	target := path
 	if resolved, err := filepath.EvalSymlinks(path); err == nil {
 		target = resolved
+	} else if info, lerr := os.Lstat(path); lerr == nil && info.Mode()&os.ModeSymlink != 0 {
+		// A dangling symlink is still a link: write at its target rather than
+		// replacing it with a regular file.
+		if link, lerr := os.Readlink(path); lerr == nil {
+			if !filepath.IsAbs(link) {
+				link = filepath.Join(filepath.Dir(path), link)
+			}
+			target = link
+		}
 	}
 	if info, err := os.Stat(target); err == nil {
 		mode = info.Mode().Perm()
