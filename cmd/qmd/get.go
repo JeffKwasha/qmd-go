@@ -37,6 +37,7 @@ var getCmd = &cobra.Command{
 		}
 
 		initRoot()
+		requireIndex()
 		s, err := openStore()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error opening store: %v\n", err)

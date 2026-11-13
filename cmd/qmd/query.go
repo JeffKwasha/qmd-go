@@ -75,6 +75,7 @@ var queryCmd = &cobra.Command{
 	Args:  cobra.MinimumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		initRoot()
+		requireIndex()
 		query := strings.Join(args, " ")
 		limit, _ := cmd.Flags().GetInt("n")
 		collection, _ := cmd.Flags().GetString("collection")

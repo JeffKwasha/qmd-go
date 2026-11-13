@@ -14,6 +14,7 @@ var lsCmd = &cobra.Command{
 	Short: "List collections or files in a collection",
 	Run: func(cmd *cobra.Command, args []string) {
 		initRoot()
+		requireIndex()
 		s, err := openStore()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error opening store: %v\n", err)

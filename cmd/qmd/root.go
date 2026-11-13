@@ -64,6 +64,16 @@ func initRoot() {
 	config.CurrentIndexName = getIndexName()
 }
 
+// requireIndex stops a read that names an index with no config. It runs before
+// the store opens, because DBPathFor would otherwise invent a cache path and
+// NewStore would create an empty database for an index that does not exist.
+func requireIndex() {
+	if _, err := config.LoadIndexConfig(getIndexName()); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
 func Execute() {
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)

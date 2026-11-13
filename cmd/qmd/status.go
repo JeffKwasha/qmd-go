@@ -14,6 +14,7 @@ var statusCmd = &cobra.Command{
 	Short: "Show index status and collections",
 	Run: func(cmd *cobra.Command, args []string) {
 		initRoot()
+		requireIndex()
 		s, err := openStore()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error opening store: %v\n", err)

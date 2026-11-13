@@ -112,6 +112,36 @@ func LoadConfig() (*Config, error) {
 	return loadConfigFile(path)
 }
 
+// LoadIndexConfig loads the config a read needs. A named index that has no
+// <name>.yml is an error, not an empty index: answering "no collections" from a
+// name nobody created hides the typo, and invites `collection add`, which would
+// create that name. Writers use LoadConfig and may create the file.
+//
+// A config directory with no indexes at all still returns the empty config, so
+// the first run can bootstrap.
+func LoadIndexConfig(indexName string) (*Config, error) {
+	if indexName == "" {
+		indexName = "index"
+	}
+	dir, err := GetConfigDir()
+	if err != nil {
+		return nil, err
+	}
+	path := filepath.Join(dir, indexName+".yml")
+	if _, err := os.Stat(path); err != nil {
+		names, err := IndexNames()
+		if err != nil {
+			return nil, err
+		}
+		if len(names) == 0 {
+			return &Config{Collections: make(map[string]Collection)}, nil
+		}
+		return nil, fmt.Errorf("no index config at %s; indexes here: %s (use --index <name>)",
+			path, strings.Join(names, ", "))
+	}
+	return loadConfigFile(path)
+}
+
 // LoadConfigFor loads the collection config for a named index without
 // consulting or mutating the package-level CurrentIndexName. It is used by
 // long-running processes (e.g. an MCP server exposing several indexes at once)

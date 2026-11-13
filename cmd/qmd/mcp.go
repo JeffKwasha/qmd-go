@@ -103,6 +103,7 @@ func runMCPServer(cmd *cobra.Command, args []string) error {
 	}
 
 	initRoot()
+	requireIndex()
 	s, err := openStore()
 	if err != nil {
 		return err
