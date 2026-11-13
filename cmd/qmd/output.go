@@ -11,6 +11,7 @@ import (
 
 // SearchOutputRow is one row for search output (all formats).
 type SearchOutputRow struct {
+	Index    string
 	Docid    string
 	Filepath string
 	Title    string
@@ -62,6 +63,9 @@ func WriteSearchOutput(rows []SearchOutputRow, format string, full bool, lineNum
 				"file":  r.Filepath,
 				"title": r.Title,
 			}
+			if r.Index != "" {
+				m["index"] = r.Index
+			}
 			if r.Context != "" {
 				m["context"] = r.Context
 			}
@@ -105,6 +109,9 @@ func WriteSearchOutput(rows []SearchOutputRow, format string, full bool, lineNum
 		for _, r := range rows {
 			fmt.Println("---")
 			fmt.Printf("# %s\n\n", r.Title)
+			if r.Index != "" {
+				fmt.Printf("**index:** `%s`\n", r.Index)
+			}
 			fmt.Printf("**docid:** `#%s`\n", r.Docid)
 			if r.Context != "" {
 				fmt.Printf("**context:** %s\n", r.Context)
@@ -118,6 +125,9 @@ func WriteSearchOutput(rows []SearchOutputRow, format string, full bool, lineNum
 		fmt.Println("<results>")
 		for _, r := range rows {
 			fmt.Println("  <result>")
+			if r.Index != "" {
+				fmt.Printf("    <index>%s</index>\n", escapeXML(r.Index))
+			}
 			fmt.Printf("    <docid>#%s</docid>\n", r.Docid)
 			fmt.Printf("    <score>%.4f</score>\n", r.Score)
 			fmt.Printf("    <file>%s</file>\n", escapeXML(r.Filepath))
@@ -131,7 +141,11 @@ func WriteSearchOutput(rows []SearchOutputRow, format string, full bool, lineNum
 		fmt.Println("</results>")
 	default:
 		for _, r := range rows {
-			fmt.Println(r.Filepath, "#"+r.Docid)
+			if r.Index != "" {
+				fmt.Println(r.Index+":"+r.Filepath, "#"+r.Docid)
+			} else {
+				fmt.Println(r.Filepath, "#"+r.Docid)
+			}
 			if r.Title != "" {
 				fmt.Println("Title:", r.Title)
 			}

@@ -5,7 +5,6 @@ import (
 	"os"
 	"strings"
 
-	"github.com/ba0f3/qmd-go/internal/config"
 	"github.com/spf13/cobra"
 )
 
@@ -15,7 +14,6 @@ var searchCmd = &cobra.Command{
 	Args:  cobra.MinimumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		initRoot()
-		requireIndex()
 		query := strings.Join(args, " ")
 		limit, _ := cmd.Flags().GetInt("n")
 		collection, _ := cmd.Flags().GetString("collection")
@@ -48,46 +46,24 @@ var searchCmd = &cobra.Command{
 			limit = 20
 		}
 
-		s, err := openStore()
+		sources, err := resolveSources()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error opening store: %v\n", err)
+			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
-		defer s.Close()
+		defer closeSources(sources)
 
-		results, err := s.SearchFTS(query, limit, collection)
+		hits, err := runFTS(sources, query, limit, collection, minScore)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Search failed: %v\n", err)
 			os.Exit(1)
 		}
-
-		cfg, _ := config.LoadConfig()
-		var rows []SearchOutputRow
-		for _, r := range results {
-			if r.Score < minScore {
-				continue
-			}
-			ctx := ""
-			if cfg != nil {
-				path := r.DisplayPath
-				if idx := strings.Index(path, "/"); idx >= 0 {
-					path = path[idx+1:]
-				}
-				ctx = config.FindContextForPath(cfg, r.CollectionName, path)
-			}
-			body := r.Body
-			if !full && len(body) > 500 {
-				body = body[:500] + "..."
-			}
-			rows = append(rows, SearchOutputRow{
-				Docid:    docid(r.Hash),
-				Filepath: r.Filepath,
-				Title:    r.Title,
-				Body:     body,
-				Score:    r.Score,
-				Context:  ctx,
-				Full:     full,
-			})
+		if len(hits) > limit {
+			hits = hits[:limit]
+		}
+		rows := make([]SearchOutputRow, 0, len(hits))
+		for _, h := range hits {
+			rows = append(rows, rowFromHit(h, full, len(sources) > 1))
 		}
 
 		if len(rows) == 0 {

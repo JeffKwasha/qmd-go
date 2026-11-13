@@ -107,10 +107,55 @@ type authSection struct {
 // who may reach them. Index content configs (index.yml, personal.yml) stay
 // separate — they are read by the CLI too.
 type serverConfig struct {
-	Servers map[string]string `yaml:"servers"` // URL path -> named index ("" = default)
-	Auth    authSection       `yaml:"auth"`
+	Servers map[string]mountTargets `yaml:"servers"` // URL path -> one or more indexes
+	Auth    authSection             `yaml:"auth"`
 
 	byHash map[string]*keyEntry
+}
+
+// mountTargets is the index list behind one mount. A scalar names one index;
+// a sequence names several, which the tools search as one answer.
+type mountTargets []string
+
+func (m *mountTargets) UnmarshalYAML(node *yaml.Node) error {
+	switch node.Kind {
+	case yaml.ScalarNode:
+		var name string
+		if err := node.Decode(&name); err != nil {
+			return err
+		}
+		name = strings.TrimSpace(name)
+		if name == "" {
+			*m = mountTargets{"index"}
+			return nil
+		}
+		*m = mountTargets{name}
+		return nil
+	case yaml.SequenceNode:
+		var names []string
+		if err := node.Decode(&names); err != nil {
+			return err
+		}
+		out := make(mountTargets, 0, len(names))
+		seen := make(map[string]bool, len(names))
+		for _, name := range names {
+			name = strings.TrimSpace(name)
+			if name == "" {
+				return fmt.Errorf("a mount index name is empty; every entry must name an index")
+			}
+			if seen[name] {
+				return fmt.Errorf("index %q is listed twice for one mount", name)
+			}
+			seen[name] = true
+			out = append(out, name)
+		}
+		if len(out) == 0 {
+			out = mountTargets{"index"}
+		}
+		*m = out
+		return nil
+	}
+	return fmt.Errorf("a mount names an index (\"/mcp: public\") or a list (\"/mcp: [public, private]\")")
 }
 
 // normalizePath is idempotent: one path has one stored spelling, so two mounts
@@ -146,7 +191,7 @@ func parseServerConfig(data []byte, path string) (*serverConfig, error) {
 		raw = append(raw, p)
 	}
 	sort.Strings(raw)
-	normalized := make(map[string]string, len(sc.Servers))
+	normalized := make(map[string]mountTargets, len(sc.Servers))
 	seen := make(map[string]string, len(sc.Servers))
 	for _, p := range raw {
 		if strings.TrimSpace(p) == "" {
@@ -161,7 +206,11 @@ func parseServerConfig(data []byte, path string) (*serverConfig, error) {
 				path, other, p, n)
 		}
 		seen[n] = p
-		normalized[n] = sc.Servers[p]
+		targets := sc.Servers[p]
+		if len(targets) == 0 {
+			targets = mountTargets{"index"}
+		}
+		normalized[n] = targets
 	}
 	sc.Servers = normalized
 	for i, p := range sc.Auth.Public {
@@ -414,14 +463,12 @@ func validateMountIndexes(sc *serverConfig, path string) error {
 	}
 	sort.Strings(mounts)
 	for _, p := range mounts {
-		name := sc.Servers[p]
-		if name == "" {
-			name = "index"
-		}
-		cfgPath := filepath.Join(dir, name+".yml")
-		if _, err := os.Stat(cfgPath); err != nil {
-			return fmt.Errorf("server config %s: mount %s points at index %q, which has no config at %s",
-				path, p, name, cfgPath)
+		for _, name := range sc.Servers[p] {
+			cfgPath := filepath.Join(dir, name+".yml")
+			if _, err := os.Stat(cfgPath); err != nil {
+				return fmt.Errorf("server config %s: mount %s points at index %q, which has no config at %s",
+					path, p, name, cfgPath)
+			}
 		}
 	}
 	return nil
@@ -533,7 +580,7 @@ type authState struct {
 	// middleware must decide 404 from the same set the mux routes from. A
 	// reloaded servers map is only compared against it to warn about the
 	// restart a mount change needs.
-	mounted map[string]string
+	mounted map[string]mountTargets
 
 	mu   sync.Mutex
 	hash string
@@ -594,13 +641,19 @@ func (a *authState) current() *serverConfig {
 	return sc
 }
 
-func sameMounts(a, b map[string]string) bool {
+func sameMounts(a, b map[string]mountTargets) bool {
 	if len(a) != len(b) {
 		return false
 	}
 	for k, v := range a {
-		if bv, ok := b[k]; !ok || bv != v {
+		bv, ok := b[k]
+		if !ok || len(bv) != len(v) {
 			return false
+		}
+		for i := range v {
+			if bv[i] != v[i] {
+				return false
+			}
 		}
 	}
 	return true
@@ -663,41 +716,55 @@ func runMCPHTTP(addr, serverCfgPath string) error {
 	sort.Strings(paths)
 
 	mux := http.NewServeMux()
-	// One MCP server (and one store) per named index, shared by every path
-	// that mounts it — an alias like /mcp must not open a second DB handle.
-	byIndex := make(map[string]*mcp.Server)
-	var stores []*store.Store
+	// One store per index, shared by every mount that names it. One MCP server
+	// per mount, because a mount's tools search exactly the indexes it names and
+	// merge their answers by rank.
+	stores := make(map[string]*store.Store)
 	defer func() {
-		for _, s := range stores {
-			_ = s.Close()
+		for _, st := range stores {
+			_ = st.Close()
 		}
 	}()
+	openSource := func(name string) (indexSource, error) {
+		if st, ok := stores[name]; ok {
+			cfg, _ := config.LoadConfigFor(name)
+			return indexSource{Name: name, Store: st, Cfg: cfg}, nil
+		}
+		dbPath, err := config.DBPathFor(name)
+		if err != nil {
+			return indexSource{}, err
+		}
+		st, err := store.NewStore(dbPath)
+		if err != nil {
+			return indexSource{}, fmt.Errorf("index %q (%s): %w", name, dbPath, err)
+		}
+		stores[name] = st
+		cfg, _ := config.LoadConfigFor(name)
+		log.Printf("qmd mcp: index %q -> %s", name, dbPath)
+		return indexSource{Name: name, Store: st, Cfg: cfg}, nil
+	}
+	byMount := make(map[string]*mcp.Server)
 
 	for _, p := range paths {
-		idx := sc.Servers[p]
-		if idx == "" {
-			idx = "index"
-		}
-		srv, ok := byIndex[idx]
+		names := sc.Servers[p]
+		key := strings.Join(names, "\x00")
+		srv, ok := byMount[key]
 		if !ok {
-			dbPath, err := config.DBPathFor(idx)
-			if err != nil {
-				return err
+			sources := make([]indexSource, 0, len(names))
+			for _, name := range names {
+				src, err := openSource(name)
+				if err != nil {
+					return err
+				}
+				sources = append(sources, src)
 			}
-			s, err := store.NewStore(dbPath)
-			if err != nil {
-				return fmt.Errorf("index %q (%s): %w", idx, dbPath, err)
-			}
-			stores = append(stores, s)
-			cfg, _ := config.LoadConfigFor(idx)
-			srv = newServer(s, cfg)
-			byIndex[idx] = srv
-			log.Printf("qmd mcp: index %q -> %s", idx, dbPath)
+			srv = newServer(sources)
+			byMount[key] = srv
 		}
 		h := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv }, &mcp.StreamableHTTPOptions{Stateless: true})
 		mux.Handle(p, h)
 		mux.Handle(p+"/", h)
-		log.Printf("qmd mcp: mount %s -> index %q", p, idx)
+		log.Printf("qmd mcp: mount %s -> indexes %v", p, names)
 	}
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, "ok")
