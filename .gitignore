@@ -15,3 +15,4 @@ qmd-go
 .deps/
 llama-go/build/
 llama-go/llama.cpp/
+.worktrees/

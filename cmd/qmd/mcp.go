@@ -3,13 +3,10 @@ package main
 import (
 	"context"
 	"net/url"
-	"os"
 	"strconv"
 	"strings"
 
 	"github.com/ba0f3/qmd-go/internal/config"
-	"github.com/ba0f3/qmd-go/internal/llm"
-	"github.com/ba0f3/qmd-go/internal/store"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/spf13/cobra"
 )
@@ -80,26 +77,44 @@ You can also access documents directly via the ` + "`qmd://`" + ` URI scheme:
 
 var mcpCmd = &cobra.Command{
 	Use:   "mcp",
-	Short: "Run MCP server (stdio)",
-	Long:  "Start the Model Context Protocol server for QMD. Exposes search, get, and document resources over stdio.",
-	RunE:  runMCPServer,
+	Short: "Run MCP server (stdio or streamable HTTP)",
+	Long:  "Start the Model Context Protocol server for QMD. Exposes search, get, and document resources. Defaults to stdio; with --http it serves multiple named indexes over MCP streamable HTTP, gated by bearer keys defined in the auth config.",
+	// A config the server refuses is read in a service journal; usage
+	// suggestions and a repeated error line only bury it.
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runMCPServer,
 }
 
 func init() {
+	mcpCmd.Flags().Bool("http", false, "Serve over MCP streamable HTTP instead of stdio")
+	mcpCmd.Flags().String("addr", "127.0.0.1:8422", "HTTP listen address (with --http)")
+	mcpCmd.Flags().String("server-config", "", "Server config YAML (with --http; default <configdir>/CONFIG.yml)")
 	rootCmd.AddCommand(mcpCmd)
 }
 
 func runMCPServer(cmd *cobra.Command, args []string) error {
+	if httpMode, _ := cmd.Flags().GetBool("http"); httpMode {
+		addr, _ := cmd.Flags().GetString("addr")
+		serverCfg, _ := cmd.Flags().GetString("server-config")
+		return runMCPHTTP(addr, serverCfg)
+	}
+
 	initRoot()
-	s, err := openStore()
+	sources, err := resolveSources()
 	if err != nil {
 		return err
 	}
-	defer s.Close()
+	defer closeSources(sources)
+	return newServer(sources).Run(context.Background(), &mcp.StdioTransport{})
+}
 
-	server := mcp.NewServer(&mcp.Implementation{Name: "qmd", Version: "1.0.0"}, nil)
+// newServer builds the MCP server (tools, resources, prompts) over one or more
+// indexes. Tools merge across them by rank; see federate.go.
+func newServer(sources []indexSource) *mcp.Server {
+	server := mcp.NewServer(&mcp.Implementation{Name: "qmd", Version: version}, nil)
 
-	server.AddResourceTemplate(&mcp.ResourceTemplate{URITemplate: "qmd://{+path}"}, resourceHandler(s))
+	server.AddResourceTemplate(&mcp.ResourceTemplate{URITemplate: "qmd://{+path}"}, resourceHandler(sources))
 	server.AddPrompt(&mcp.Prompt{
 		Name:        "query",
 		Description: "How to effectively search your knowledge base with QMD",
@@ -113,32 +128,99 @@ func runMCPServer(cmd *cobra.Command, args []string) error {
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "search",
 		Description: "Fast keyword-based full-text search using BM25. Best for finding documents with specific words or phrases.",
-	}, searchTool(s))
+	}, searchTool(sources))
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "vsearch",
 		Description: "Semantic similarity search using vector embeddings. Requires embeddings (run 'qmd embed' first).",
-	}, vsearchTool(s))
+	}, vsearchTool(sources))
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "query",
 		Description: "Hybrid search combining BM25 and vector search with RRF. Best quality when embeddings exist.",
-	}, queryTool(s))
+	}, queryTool(sources))
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "get",
 		Description: "Retrieve the full content of a document by its file path or docid (#abc123).",
-	}, getTool(s))
+	}, getTool(sources))
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "multi_get",
 		Description: "Retrieve multiple documents by glob pattern or comma-separated list. Skips files larger than maxBytes.",
-	}, multiGetTool(s))
+	}, multiGetTool(sources))
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "status",
 		Description: "Show the status of the QMD index: collections and document counts.",
-	}, statusTool(s))
+	}, statusTool(sources))
 
-	return server.Run(context.Background(), &mcp.StdioTransport{})
+	return server
 }
 
-func resourceHandler(s *store.Store) mcp.ResourceHandler {
+// fused reports whether more than one index answers here, which is what decides
+// whether results carry an index label.
+func fused(sources []indexSource) bool { return len(sources) > 1 }
+
+func toolError(msg string) (*mcp.CallToolResult, any, error) {
+	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: msg}}, IsError: true}, nil, nil
+}
+
+func resultLimit(n, def int) int {
+	if n <= 0 {
+		return def
+	}
+	return n
+}
+
+func truncateHits(hits []fusedHit, limit int) []fusedHit {
+	if limit > 0 && len(hits) > limit {
+		return hits[:limit]
+	}
+	return hits
+}
+
+// hitsResult turns merged hits into the tool answer. The index name appears only
+// when several indexes contributed, so single-index answers look as they always
+// did.
+func hitsResult(hits []fusedHit, query string, label bool) (*mcp.CallToolResult, any, error) {
+	if len(hits) == 0 {
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: "No results found for \"" + query + "\""}},
+		}, nil, nil
+	}
+	var b strings.Builder
+	b.WriteString("Found ")
+	b.WriteString(strconv.Itoa(len(hits)))
+	b.WriteString(" result(s) for \"")
+	b.WriteString(query)
+	b.WriteString("\":\n\n")
+	structured := make([]map[string]any, len(hits))
+	for i, h := range hits {
+		b.WriteString("#")
+		b.WriteString(docid(h.Hash))
+		b.WriteString(" ")
+		b.WriteString(strconv.FormatFloat(h.Score*100, 'f', 0, 64))
+		b.WriteString("% ")
+		if label {
+			b.WriteString(h.Index)
+			b.WriteString(":")
+		}
+		b.WriteString(h.DisplayPath)
+		b.WriteString(" - ")
+		b.WriteString(h.Title)
+		b.WriteString("\n")
+		m := map[string]any{
+			"docid": "#" + docid(h.Hash), "file": h.DisplayPath, "title": h.Title,
+			"score": roundScore(h.Score), "context": h.Context, "snippet": snippet(h.Body, query, 300),
+		}
+		if label {
+			m["index"] = h.Index
+		}
+		structured[i] = m
+	}
+	return &mcp.CallToolResult{
+		Content:           []mcp.Content{&mcp.TextContent{Text: b.String()}},
+		StructuredContent: map[string]any{"results": structured},
+	}, nil, nil
+}
+
+func resourceHandler(sources []indexSource) mcp.ResourceHandler {
 	return func(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
 		uri := req.Params.URI
 		if !strings.HasPrefix(uri, "qmd://") {
@@ -154,206 +236,111 @@ func resourceHandler(s *store.Store) mcp.ResourceHandler {
 			return nil, mcp.ResourceNotFoundError(uri)
 		}
 		collection, path := parts[0], parts[1]
-		body, err := s.GetDocumentBody(collection, path, 0, 0)
-		if err != nil {
-			all, _ := s.ListDocumentPaths()
-			for _, p := range all {
-				if strings.HasSuffix(p.Path, path) || p.Path == path {
-					body, err = s.GetDocumentBody(p.Collection, p.Path, 0, 0)
-					if err == nil {
-						collection, path = p.Collection, p.Path
-						break
+		for _, src := range sources {
+			body, err := src.Store.GetDocumentBody(collection, path, 0, 0)
+			if err != nil {
+				all, _ := src.Store.ListDocumentPaths()
+				for _, p := range all {
+					if strings.HasSuffix(p.Path, path) || p.Path == path {
+						body, err = src.Store.GetDocumentBody(p.Collection, p.Path, 0, 0)
+						if err == nil {
+							collection, path = p.Collection, p.Path
+							break
+						}
 					}
 				}
 			}
-		}
-		if err != nil || body == "" {
-			return nil, mcp.ResourceNotFoundError(uri)
-		}
-		cfg, _ := config.LoadConfig()
-		if cfg != nil {
-			if ctxText := config.FindContextForPath(cfg, collection, path); ctxText != "" {
+			if err != nil || body == "" {
+				continue
+			}
+			if ctxText := config.FindContextForPath(src.Cfg, collection, path); ctxText != "" {
 				body = "<!-- Context: " + ctxText + " -->\n\n" + body
 			}
+			body = addLineNumbers(body, 1)
+			return &mcp.ReadResourceResult{
+				Contents: []*mcp.ResourceContents{{URI: uri, MIMEType: "text/markdown", Text: body}},
+			}, nil
 		}
-		body = addLineNumbers(body, 1)
-		return &mcp.ReadResourceResult{
-			Contents: []*mcp.ResourceContents{{URI: uri, MIMEType: "text/markdown", Text: body}},
-		}, nil
+		return nil, mcp.ResourceNotFoundError(uri)
 	}
 }
 
 type searchArgs struct {
-	Query      string  `json:"query" jsonschema:"required,description=Search query - keywords or phrases to find"`
-	Limit      int     `json:"limit" jsonschema:"description=Maximum number of results (default 10)"`
-	MinScore   float64 `json:"minScore" jsonschema:"description=Minimum relevance score 0-1 (default 0)"`
-	Collection string  `json:"collection" jsonschema:"description=Filter to a specific collection by name"`
+	Query      string  `json:"query" jsonschema:"Search query - keywords or phrases to find"`
+	Limit      int     `json:"limit,omitempty" jsonschema:"Maximum number of results (default 10)"`
+	MinScore   float64 `json:"minScore,omitempty" jsonschema:"Minimum relevance score 0-1 (default 0)"`
+	Collection string  `json:"collection,omitempty" jsonschema:"Filter to a specific collection by name"`
 }
 
-func searchTool(s *store.Store) func(context.Context, *mcp.CallToolRequest, searchArgs) (*mcp.CallToolResult, any, error) {
+func searchTool(sources []indexSource) func(context.Context, *mcp.CallToolRequest, searchArgs) (*mcp.CallToolResult, any, error) {
 	return func(ctx context.Context, req *mcp.CallToolRequest, args searchArgs) (*mcp.CallToolResult, any, error) {
-		limit := args.Limit
-		if limit <= 0 {
-			limit = 10
-		}
-		results, err := s.SearchFTS(args.Query, limit*2, args.Collection)
+		limit := resultLimit(args.Limit, 10)
+		hits, err := runFTS(sources, args.Query, limit*2, args.Collection, args.MinScore)
 		if err != nil {
-			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "Search failed: " + err.Error()}}, IsError: true}, nil, nil
+			return toolError("Search failed: " + err.Error())
 		}
-		var filtered []store.SearchResult
-		for _, r := range results {
-			if r.Score >= args.MinScore && (args.Collection == "" || r.CollectionName == args.Collection) {
-				filtered = append(filtered, r)
-				if len(filtered) >= limit {
-					break
-				}
-			}
-		}
-		summary := formatSearchSummary(filtered, args.Query, s)
-		structured := make([]map[string]any, len(filtered))
-		for i, r := range filtered {
-			structured[i] = map[string]any{
-				"docid": "#" + docid(r.Hash), "file": r.DisplayPath, "title": r.Title,
-				"score": roundScore(r.Score), "context": getContextForFile(s, r.Filepath), "snippet": snippet(r.Body, args.Query, 300),
-			}
-		}
-		return &mcp.CallToolResult{
-			Content:           []mcp.Content{&mcp.TextContent{Text: summary}},
-			StructuredContent: map[string]any{"results": structured},
-		}, nil, nil
+		return hitsResult(truncateHits(hits, limit), args.Query, fused(sources))
 	}
 }
 
 type vsearchArgs struct {
-	Query      string  `json:"query" jsonschema:"required,description=Natural language query"`
-	Limit      int     `json:"limit" jsonschema:"description=Maximum number of results (default 10)"`
-	MinScore   float64 `json:"minScore" jsonschema:"description=Minimum relevance score 0-1 (default 0.3)"`
-	Collection string  `json:"collection" jsonschema:"description=Filter to a specific collection"`
+	Query      string  `json:"query" jsonschema:"Natural language query"`
+	Limit      int     `json:"limit,omitempty" jsonschema:"Maximum number of results (default 10)"`
+	MinScore   float64 `json:"minScore,omitempty" jsonschema:"Minimum relevance score 0-1 (default 0.3)"`
+	Collection string  `json:"collection,omitempty" jsonschema:"Filter to a specific collection"`
 }
 
-func vsearchTool(s *store.Store) func(context.Context, *mcp.CallToolRequest, vsearchArgs) (*mcp.CallToolResult, any, error) {
+func vsearchTool(sources []indexSource) func(context.Context, *mcp.CallToolRequest, vsearchArgs) (*mcp.CallToolResult, any, error) {
 	return func(ctx context.Context, req *mcp.CallToolRequest, args vsearchArgs) (*mcp.CallToolResult, any, error) {
-		var hasVec int
-		_ = s.DB.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='embedding_blobs'`).Scan(&hasVec)
-		if hasVec == 0 {
-			return &mcp.CallToolResult{
-				Content: []mcp.Content{&mcp.TextContent{Text: "Vector index not found. Run 'qmd embed' first to create embeddings."}},
-				IsError: true,
-			}, nil, nil
-		}
-		model := os.Getenv("QMD_EMBED_MODEL")
-		if model == "" {
-			model = llm.DefaultEmbedModel()
-		}
-		client, err := llm.NewEmbedClient(model)
-		if err != nil {
-			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "Embed client: " + err.Error()}}, IsError: true}, nil, nil
-		}
-		formatted := formatQueryForEmbedding(args.Query)
-		emb, err := client.Embed(formatted)
-		if err != nil {
-			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "Embedding failed: " + err.Error()}}, IsError: true}, nil, nil
-		}
-		limit := args.Limit
-		if limit <= 0 {
-			limit = 10
-		}
-		vecResults, err := s.SearchVectorsBrute(emb.Embedding, limit*2)
-		if err != nil {
-			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "Vector search failed: " + err.Error()}}, IsError: true}, nil, nil
-		}
-		var filtered []store.VecSearchResult
-		for _, r := range vecResults {
-			if r.Score >= args.MinScore && (args.Collection == "" || strings.HasPrefix(r.Filepath, "qmd://"+args.Collection+"/")) {
-				filtered = append(filtered, r)
-				if len(filtered) >= limit {
-					break
-				}
+		hasAny := false
+		for _, src := range sources {
+			if src.hasVectors() {
+				hasAny = true
+				break
 			}
 		}
-		summary := formatVecSearchSummary(filtered, args.Query, s)
-		structured := make([]map[string]any, len(filtered))
-		for i, r := range filtered {
-			structured[i] = map[string]any{
-				"docid": "#" + docid(r.Hash), "file": r.DisplayPath, "title": r.Title,
-				"score": roundScore(r.Score), "context": getContextForFile(s, r.Filepath), "snippet": snippet(r.Body, args.Query, 300),
-			}
+		if !hasAny {
+			return toolError("Vector index not found. Run 'qmd embed' first to create embeddings.")
 		}
-		return &mcp.CallToolResult{
-			Content:           []mcp.Content{&mcp.TextContent{Text: summary}},
-			StructuredContent: map[string]any{"results": structured},
-		}, nil, nil
+		limit := resultLimit(args.Limit, 10)
+		hits, err := runVectors(sources, args.Query, limit, args.MinScore, args.Collection)
+		if err != nil {
+			return toolError("Vector search failed: " + err.Error())
+		}
+		return hitsResult(truncateHits(hits, limit), args.Query, fused(sources))
 	}
 }
 
 type queryArgs struct {
-	Query      string  `json:"query" jsonschema:"required,description=Natural language query"`
-	Limit      int     `json:"limit" jsonschema:"description=Maximum number of results (default 10)"`
-	MinScore   float64 `json:"minScore" jsonschema:"description=Minimum relevance score 0-1"`
-	Collection string  `json:"collection" jsonschema:"description=Filter to a specific collection"`
+	Query      string  `json:"query" jsonschema:"Natural language query"`
+	Limit      int     `json:"limit,omitempty" jsonschema:"Maximum number of results (default 10)"`
+	MinScore   float64 `json:"minScore,omitempty" jsonschema:"Minimum relevance score 0-1"`
+	Collection string  `json:"collection,omitempty" jsonschema:"Filter to a specific collection"`
 }
 
-func queryTool(s *store.Store) func(context.Context, *mcp.CallToolRequest, queryArgs) (*mcp.CallToolResult, any, error) {
+func queryTool(sources []indexSource) func(context.Context, *mcp.CallToolRequest, queryArgs) (*mcp.CallToolResult, any, error) {
 	return func(ctx context.Context, req *mcp.CallToolRequest, args queryArgs) (*mcp.CallToolResult, any, error) {
-		limit := args.Limit
-		if limit <= 0 {
-			limit = 10
-		}
+		limit := resultLimit(args.Limit, 10)
 		fetchLimit := limit * 4
 		if fetchLimit < 20 {
 			fetchLimit = 20
 		}
-		ftsResults, err := s.SearchFTS(args.Query, fetchLimit, args.Collection)
+		hits, err := runHybrid(sources, args.Query, fetchLimit, args.Collection, args.MinScore)
 		if err != nil {
-			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "Search failed: " + err.Error()}}, IsError: true}, nil, nil
+			return toolError("Search failed: " + err.Error())
 		}
-		var vecResults []store.VecSearchResult
-		var hasVec int
-		_ = s.DB.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='embedding_blobs'`).Scan(&hasVec)
-		if hasVec > 0 {
-			model := os.Getenv("QMD_EMBED_MODEL")
-			if model == "" {
-				model = llm.DefaultEmbedModel()
-			}
-			client, err := llm.NewEmbedClient(model)
-			if err == nil {
-				formatted := formatQueryForEmbedding(args.Query)
-				emb, err := client.Embed(formatted)
-				if err == nil {
-					vecResults, _ = s.SearchVectorsBrute(emb.Embedding, fetchLimit)
-				}
-			}
-		}
-		merged := reciprocalRankFusion(ftsResults, vecResults, limit)
-		var filtered []hybridResult
-		for _, r := range merged {
-			if r.Score >= args.MinScore {
-				filtered = append(filtered, r)
-			}
-		}
-		summary := formatHybridSummary(filtered, args.Query, s)
-		structured := make([]map[string]any, len(filtered))
-		for i, r := range filtered {
-			structured[i] = map[string]any{
-				"docid": "#" + docid(r.Hash), "file": r.DisplayPath, "title": r.Title,
-				"score": roundScore(r.Score), "context": getContextForFile(s, r.Filepath), "snippet": snippet(r.Body, args.Query, 300),
-			}
-		}
-		return &mcp.CallToolResult{
-			Content:           []mcp.Content{&mcp.TextContent{Text: summary}},
-			StructuredContent: map[string]any{"results": structured},
-		}, nil, nil
+		return hitsResult(truncateHits(hits, limit), args.Query, fused(sources))
 	}
 }
 
 type getArgs struct {
-	File        string `json:"file" jsonschema:"required,description=File path or docid (e.g. pages/meeting.md or #abc123)"`
-	FromLine    int    `json:"fromLine" jsonschema:"description=Start from this line number (1-indexed)"`
-	MaxLines    int    `json:"maxLines" jsonschema:"description=Maximum number of lines to return"`
-	LineNumbers bool   `json:"lineNumbers" jsonschema:"description=Add line numbers to output"`
+	File        string `json:"file" jsonschema:"File path or docid (e.g. pages/meeting.md or #abc123)"`
+	FromLine    int    `json:"fromLine,omitempty" jsonschema:"Start from this line number (1-indexed)"`
+	MaxLines    int    `json:"maxLines,omitempty" jsonschema:"Maximum number of lines to return"`
+	LineNumbers bool   `json:"lineNumbers,omitempty" jsonschema:"Add line numbers to output"`
 }
 
-func getTool(s *store.Store) func(context.Context, *mcp.CallToolRequest, getArgs) (*mcp.CallToolResult, any, error) {
+func getTool(sources []indexSource) func(context.Context, *mcp.CallToolRequest, getArgs) (*mcp.CallToolResult, any, error) {
 	return func(ctx context.Context, req *mcp.CallToolRequest, args getArgs) (*mcp.CallToolResult, any, error) {
 		input := args.File
 		fromLine := args.FromLine
@@ -364,25 +351,17 @@ func getTool(s *store.Store) func(context.Context, *mcp.CallToolRequest, getArgs
 				input = input[:idx]
 			}
 		}
-		collection, path := resolveInputToDoc(s, input)
-		if collection == "" && path == "" {
-			return &mcp.CallToolResult{
-				Content: []mcp.Content{&mcp.TextContent{Text: "Document not found: " + args.File}},
-				IsError: true,
-			}, nil, nil
+		narrowed, input := indexPrefix(sources, input)
+		src, collection, path, ok := findDoc(narrowed, input)
+		if !ok {
+			return toolError("Document not found: " + args.File)
 		}
-		body, err := s.GetDocumentBody(collection, path, fromLine, maxLines)
+		body, err := src.Store.GetDocumentBody(collection, path, fromLine, maxLines)
 		if err != nil {
-			return &mcp.CallToolResult{
-				Content: []mcp.Content{&mcp.TextContent{Text: "Document not found: " + args.File}},
-				IsError: true,
-			}, nil, nil
+			return toolError("Document not found: " + args.File)
 		}
-		cfg, _ := config.LoadConfig()
-		if cfg != nil {
-			if ctxText := config.FindContextForPath(cfg, collection, path); ctxText != "" {
-				body = "<!-- Context: " + ctxText + " -->\n\n" + body
-			}
+		if ctxText := config.FindContextForPath(src.Cfg, collection, path); ctxText != "" {
+			body = "<!-- Context: " + ctxText + " -->\n\n" + body
 		}
 		if args.LineNumbers {
 			start := fromLine
@@ -398,13 +377,13 @@ func getTool(s *store.Store) func(context.Context, *mcp.CallToolRequest, getArgs
 }
 
 type multiGetArgs struct {
-	Pattern     string `json:"pattern" jsonschema:"required,description=Glob pattern or comma-separated list of paths"`
-	MaxLines    int    `json:"maxLines" jsonschema:"description=Maximum lines per file"`
-	MaxBytes    int    `json:"maxBytes" jsonschema:"description=Skip files larger than this (default 10240)"`
-	LineNumbers bool   `json:"lineNumbers" jsonschema:"description=Add line numbers"`
+	Pattern     string `json:"pattern" jsonschema:"Glob pattern or comma-separated list of paths"`
+	MaxLines    int    `json:"maxLines,omitempty" jsonschema:"Maximum lines per file"`
+	MaxBytes    int    `json:"maxBytes,omitempty" jsonschema:"Skip files larger than this (default 10240)"`
+	LineNumbers bool   `json:"lineNumbers,omitempty" jsonschema:"Add line numbers"`
 }
 
-func multiGetTool(s *store.Store) func(context.Context, *mcp.CallToolRequest, multiGetArgs) (*mcp.CallToolResult, any, error) {
+func multiGetTool(sources []indexSource) func(context.Context, *mcp.CallToolRequest, multiGetArgs) (*mcp.CallToolResult, any, error) {
 	return func(ctx context.Context, req *mcp.CallToolRequest, args multiGetArgs) (*mcp.CallToolResult, any, error) {
 		maxBytes := args.MaxBytes
 		if maxBytes <= 0 {
@@ -412,21 +391,25 @@ func multiGetTool(s *store.Store) func(context.Context, *mcp.CallToolRequest, mu
 		}
 		var docs []docForMultiGet
 		if strings.Contains(args.Pattern, ",") && !strings.Contains(args.Pattern, "*") && !strings.Contains(args.Pattern, "?") {
-			docs = multiGetByList(s, strings.Split(args.Pattern, ","), args.MaxLines, maxBytes)
+			docs = multiGetByList(sources, strings.Split(args.Pattern, ","), args.MaxLines, maxBytes)
 		} else {
-			docs = multiGetByGlob(s, args.Pattern, args.MaxLines, maxBytes)
+			for _, src := range sources {
+				docs = append(docs, multiGetByGlob(src, args.Pattern, args.MaxLines, maxBytes)...)
+			}
+		}
+		if !fused(sources) {
+			for i := range docs {
+				docs[i].Index = ""
+			}
 		}
 		if len(docs) == 0 {
-			return &mcp.CallToolResult{
-				Content: []mcp.Content{&mcp.TextContent{Text: "No files matched pattern: " + args.Pattern}},
-				IsError: true,
-			}, nil, nil
+			return toolError("No files matched pattern: " + args.Pattern)
 		}
 		var content []mcp.Content
 		for _, d := range docs {
 			text := d.Body
 			if d.Skipped {
-				text = "[SKIPPED: " + d.DisplayPath + " - " + d.SkipReason + ". Use get with file=\"" + d.DisplayPath + "\" to retrieve.]"
+				text = "[SKIPPED: " + d.label() + " - " + d.SkipReason + ". Use get with file=\"" + d.label() + "\" to retrieve.]"
 			} else {
 				if args.LineNumbers {
 					text = addLineNumbers(text, 1)
@@ -435,128 +418,48 @@ func multiGetTool(s *store.Store) func(context.Context, *mcp.CallToolRequest, mu
 					text = "<!-- Context: " + d.Context + " -->\n\n" + text
 				}
 			}
-			content = append(content, &mcp.TextContent{Text: "--- " + d.DisplayPath + " ---\n" + text})
+			content = append(content, &mcp.TextContent{Text: "--- " + d.label() + " ---\n" + text})
 		}
 		return &mcp.CallToolResult{Content: content}, nil, nil
 	}
 }
 
-func statusTool(s *store.Store) func(context.Context, *mcp.CallToolRequest, struct{}) (*mcp.CallToolResult, any, error) {
+func statusTool(sources []indexSource) func(context.Context, *mcp.CallToolRequest, struct{}) (*mcp.CallToolResult, any, error) {
 	return func(ctx context.Context, req *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, any, error) {
-		st, err := s.GetStatus()
-		if err != nil {
-			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "Failed to get status: " + err.Error()}}, IsError: true}, nil, nil
-		}
-		var needsEmbed int
-		_ = s.DB.QueryRow(`SELECT COUNT(DISTINCT d.hash) FROM documents d LEFT JOIN content_vectors v ON d.hash = v.hash AND v.seq = 0 WHERE d.active = 1 AND v.hash IS NULL`).Scan(&needsEmbed)
-		var n int
-		_ = s.DB.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='embedding_blobs'`).Scan(&n)
-		hasVec := n > 0
-		lines := []string{
-			"QMD Index Status:",
-			"  Total documents: " + strconv.Itoa(st.DocCount),
-			"  Needs embedding: " + strconv.Itoa(needsEmbed),
-			"  Vector index: " + strconv.FormatBool(hasVec),
-			"  Collections: " + strconv.Itoa(len(st.Collections)),
-		}
-		for _, c := range st.Collections {
-			lines = append(lines, "    - "+c.Name+" ("+strconv.Itoa(c.ActiveCount)+" docs)")
-		}
-		structured := map[string]any{
-			"totalDocuments": st.DocCount,
-			"needsEmbedding": needsEmbed,
-			"hasVectorIndex": hasVec,
-			"collections":    st.Collections,
+		var lines []string
+		structured := make([]map[string]any, 0, len(sources))
+		for _, src := range sources {
+			st, err := src.Store.GetStatus()
+			if err != nil {
+				return toolError("Failed to get status: " + err.Error())
+			}
+			var needsEmbed int
+			_ = src.Store.DB.QueryRow(`SELECT COUNT(DISTINCT d.hash) FROM documents d LEFT JOIN content_vectors v ON d.hash = v.hash AND v.seq = 0 WHERE d.active = 1 AND v.hash IS NULL`).Scan(&needsEmbed)
+			hasVec := src.hasVectors()
+			label := "QMD Index Status:"
+			if fused(sources) {
+				label = "QMD Index Status: " + src.Name
+			}
+			lines = append(lines,
+				label,
+				"  Total documents: "+strconv.Itoa(st.DocCount),
+				"  Needs embedding: "+strconv.Itoa(needsEmbed),
+				"  Vector index: "+strconv.FormatBool(hasVec),
+				"  Collections: "+strconv.Itoa(len(st.Collections)),
+			)
+			for _, c := range st.Collections {
+				lines = append(lines, "    - "+c.Name+" ("+strconv.Itoa(c.ActiveCount)+" docs)")
+			}
+			structured = append(structured, map[string]any{
+				"index": src.Name, "totalDocuments": st.DocCount, "needsEmbedding": needsEmbed,
+				"hasVectorIndex": hasVec, "collections": st.Collections,
+			})
 		}
 		return &mcp.CallToolResult{
 			Content:           []mcp.Content{&mcp.TextContent{Text: strings.Join(lines, "\n")}},
-			StructuredContent: structured,
+			StructuredContent: map[string]any{"indexes": structured},
 		}, nil, nil
 	}
-}
-
-func getContextForFile(s *store.Store, filepath string) string {
-	col, path := parseVirtualPath(filepath)
-	if col == "" {
-		return ""
-	}
-	cfg, _ := config.LoadConfig()
-	if cfg == nil {
-		return ""
-	}
-	return config.FindContextForPath(cfg, col, path)
-}
-
-func formatSearchSummary(results []store.SearchResult, query string, s *store.Store) string {
-	if len(results) == 0 {
-		return "No results found for \"" + query + "\""
-	}
-	var b strings.Builder
-	b.WriteString("Found ")
-	b.WriteString(strconv.Itoa(len(results)))
-	b.WriteString(" result(s) for \"")
-	b.WriteString(query)
-	b.WriteString("\":\n\n")
-	for _, r := range results {
-		b.WriteString("#")
-		b.WriteString(docid(r.Hash))
-		b.WriteString(" ")
-		b.WriteString(strconv.FormatFloat(r.Score*100, 'f', 0, 64))
-		b.WriteString("% ")
-		b.WriteString(r.DisplayPath)
-		b.WriteString(" - ")
-		b.WriteString(r.Title)
-		b.WriteString("\n")
-	}
-	return b.String()
-}
-
-func formatVecSearchSummary(results []store.VecSearchResult, query string, s *store.Store) string {
-	if len(results) == 0 {
-		return "No results found for \"" + query + "\""
-	}
-	var b strings.Builder
-	b.WriteString("Found ")
-	b.WriteString(strconv.Itoa(len(results)))
-	b.WriteString(" result(s) for \"")
-	b.WriteString(query)
-	b.WriteString("\":\n\n")
-	for _, r := range results {
-		b.WriteString("#")
-		b.WriteString(docid(r.Hash))
-		b.WriteString(" ")
-		b.WriteString(strconv.FormatFloat(r.Score*100, 'f', 0, 64))
-		b.WriteString("% ")
-		b.WriteString(r.DisplayPath)
-		b.WriteString(" - ")
-		b.WriteString(r.Title)
-		b.WriteString("\n")
-	}
-	return b.String()
-}
-
-func formatHybridSummary(results []hybridResult, query string, s *store.Store) string {
-	if len(results) == 0 {
-		return "No results found for \"" + query + "\""
-	}
-	var b strings.Builder
-	b.WriteString("Found ")
-	b.WriteString(strconv.Itoa(len(results)))
-	b.WriteString(" result(s) for \"")
-	b.WriteString(query)
-	b.WriteString("\":\n\n")
-	for _, r := range results {
-		b.WriteString("#")
-		b.WriteString(docid(r.Hash))
-		b.WriteString(" ")
-		b.WriteString(strconv.FormatFloat(r.Score*100, 'f', 0, 64))
-		b.WriteString("% ")
-		b.WriteString(r.DisplayPath)
-		b.WriteString(" - ")
-		b.WriteString(r.Title)
-		b.WriteString("\n")
-	}
-	return b.String()
 }
 
 func snippet(body, query string, maxLen int) string {

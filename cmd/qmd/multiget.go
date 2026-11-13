@@ -17,7 +17,7 @@ const defaultMultiGetMaxBytes = 10240
 var multiGetCmd = &cobra.Command{
 	Use:   "multi-get <pattern>",
 	Short: "Get multiple documents by glob or comma-separated list",
-	Long:  "Pattern can be a glob (e.g. journals/2025*.md) or comma-separated paths/docids.",
+	Long:  "Pattern can be a glob (e.g. journals/2025*.md) or comma-separated paths/docids. Each name may carry an index prefix (public:qmd://pub/doc.md).",
 	Args:  cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		pattern := args[0]
@@ -40,18 +40,29 @@ var multiGetCmd = &cobra.Command{
 		}
 
 		initRoot()
-		s, err := openStore()
+		sources, err := resolveSources()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error opening store: %v\n", err)
+			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
-		defer s.Close()
+		defer closeSources(sources)
 
 		var docs []docForMultiGet
+		federated := len(sources) > 1
 		if strings.Contains(pattern, ",") && !strings.Contains(pattern, "*") && !strings.Contains(pattern, "?") {
-			docs = multiGetByList(s, strings.Split(pattern, ","), maxLines, maxBytes)
+			// Each name decides its own index; narrowing the whole pattern would
+			// drop every name that belongs elsewhere.
+			docs = multiGetByList(sources, strings.Split(pattern, ","), maxLines, maxBytes)
 		} else {
-			docs = multiGetByGlob(s, pattern, maxLines, maxBytes)
+			narrowed, globPattern := indexPrefix(sources, pattern)
+			for _, src := range narrowed {
+				docs = append(docs, multiGetByGlob(src, globPattern, maxLines, maxBytes)...)
+			}
+		}
+		if !federated {
+			for i := range docs {
+				docs[i].Index = ""
+			}
 		}
 
 		if len(docs) == 0 {
@@ -64,8 +75,11 @@ var multiGetCmd = &cobra.Command{
 			out := make([]map[string]interface{}, 0, len(docs))
 			for _, d := range docs {
 				m := map[string]interface{}{
-					"file":  d.DisplayPath,
+					"file":  d.label(),
 					"title": d.Title,
+				}
+				if d.Index != "" {
+					m["index"] = d.Index
 				}
 				if d.Context != "" {
 					m["context"] = d.Context
@@ -83,7 +97,7 @@ var multiGetCmd = &cobra.Command{
 			_ = enc.Encode(out)
 			return
 		case "csv":
-			fmt.Println("file,title,context,skipped,body")
+			fmt.Println("file,index,title,context,skipped,body")
 			for _, d := range docs {
 				skipped := "false"
 				body := d.Body
@@ -91,12 +105,12 @@ var multiGetCmd = &cobra.Command{
 					skipped = "true"
 					body = d.SkipReason
 				}
-				fmt.Printf("%s,%s,%s,%s,%s\n", escapeCSV(d.DisplayPath), escapeCSV(d.Title), escapeCSV(d.Context), skipped, escapeCSV(body))
+				fmt.Printf("%s,%s,%s,%s,%s,%s\n", escapeCSV(d.label()), escapeCSV(d.Index), escapeCSV(d.Title), escapeCSV(d.Context), skipped, escapeCSV(body))
 			}
 			return
 		case "md":
 			for _, d := range docs {
-				fmt.Println("##", d.DisplayPath)
+				fmt.Println("##", d.label())
 				fmt.Println()
 				if d.Title != "" {
 					fmt.Println("**Title:**", d.Title)
@@ -122,7 +136,7 @@ var multiGetCmd = &cobra.Command{
 			fmt.Println("<documents>")
 			for _, d := range docs {
 				fmt.Println("  <document>")
-				fmt.Printf("    <file>%s</file>\n", escapeXML(d.DisplayPath))
+				fmt.Printf("    <file>%s</file>\n", escapeXML(d.label()))
 				fmt.Printf("    <title>%s</title>\n", escapeXML(d.Title))
 				if d.Context != "" {
 					fmt.Printf("    <context>%s</context>\n", escapeXML(d.Context))
@@ -146,14 +160,14 @@ var multiGetCmd = &cobra.Command{
 				if d.Skipped {
 					skip = ",[SKIPPED]"
 				}
-				fmt.Printf("%s%s%s\n", d.DisplayPath, ctx, skip)
+				fmt.Printf("%s%s%s\n", d.label(), ctx, skip)
 			}
 			return
 		}
 
 		for _, d := range docs {
 			fmt.Println(strings.Repeat("=", 60))
-			fmt.Println("File:", d.DisplayPath)
+			fmt.Println("File:", d.label())
 			fmt.Println(strings.Repeat("=", 60))
 			if d.Skipped {
 				fmt.Println("[SKIPPED:", d.SkipReason+"]")
@@ -169,6 +183,7 @@ var multiGetCmd = &cobra.Command{
 }
 
 type docForMultiGet struct {
+	Index       string
 	DisplayPath string
 	Title       string
 	Body        string
@@ -177,20 +192,32 @@ type docForMultiGet struct {
 	SkipReason  string
 }
 
-func multiGetByList(s *store.Store, names []string, maxLines, maxBytes int) []docForMultiGet {
+// label is the path as printed: with several indexes, `index:qmd://...`, the
+// form `qmd get` and the search output both use.
+func (d docForMultiGet) label() string {
+	if d.Index == "" {
+		return d.DisplayPath
+	}
+	return d.Index + ":" + d.DisplayPath
+}
+
+// multiGetByList resolves each name across every source and reports a name
+// once, when no index holds it. Asking each index in turn would print one
+// "not found" per index for every name that lives in another.
+func multiGetByList(sources []indexSource, names []string, maxLines, maxBytes int) []docForMultiGet {
 	var out []docForMultiGet
-	cfg, _ := config.LoadConfig()
 	for _, name := range names {
 		name = strings.TrimSpace(name)
 		if name == "" {
 			continue
 		}
-		collection, path := resolveInputToDoc(s, name)
-		if collection == "" && path == "" {
+		narrowed, input := indexPrefix(sources, name)
+		src, collection, path, ok := findDoc(narrowed, input)
+		if !ok {
 			fmt.Fprintf(os.Stderr, "File not found: %s\n", name)
 			continue
 		}
-		body, err := s.GetDocumentBody(collection, path, 0, maxLines)
+		body, err := src.Store.GetDocumentBody(collection, path, 0, maxLines)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "File not found: %s\n", name)
 			continue
@@ -200,10 +227,7 @@ func multiGetByList(s *store.Store, names []string, maxLines, maxBytes int) []do
 		if idx := strings.LastIndex(title, "/"); idx >= 0 {
 			title = title[idx+1:]
 		}
-		ctx := ""
-		if cfg != nil {
-			ctx = config.FindContextForPath(cfg, collection, path)
-		}
+		ctx := config.FindContextForPath(src.Cfg, collection, path)
 		skipped := false
 		reason := ""
 		if len(body) > maxBytes {
@@ -212,6 +236,7 @@ func multiGetByList(s *store.Store, names []string, maxLines, maxBytes int) []do
 			body = ""
 		}
 		out = append(out, docForMultiGet{
+			Index:       src.Name,
 			DisplayPath: displayPath,
 			Title:       title,
 			Body:        body,
@@ -223,8 +248,8 @@ func multiGetByList(s *store.Store, names []string, maxLines, maxBytes int) []do
 	return out
 }
 
-func multiGetByGlob(s *store.Store, pattern string, maxLines, maxBytes int) []docForMultiGet {
-	paths, err := s.ListDocumentPaths()
+func multiGetByGlob(src indexSource, pattern string, maxLines, maxBytes int) []docForMultiGet {
+	paths, err := src.Store.ListDocumentPaths()
 	if err != nil {
 		return nil
 	}
@@ -241,10 +266,9 @@ func multiGetByGlob(s *store.Store, pattern string, maxLines, maxBytes int) []do
 	if len(matched) == 0 {
 		return nil
 	}
-	cfg, _ := config.LoadConfig()
 	out := make([]docForMultiGet, 0, len(matched))
 	for _, p := range matched {
-		body, err := s.GetDocumentBody(p.Collection, p.Path, 0, maxLines)
+		body, err := src.Store.GetDocumentBody(p.Collection, p.Path, 0, maxLines)
 		if err != nil {
 			continue
 		}
@@ -252,10 +276,7 @@ func multiGetByGlob(s *store.Store, pattern string, maxLines, maxBytes int) []do
 		if idx := strings.LastIndex(title, "/"); idx >= 0 {
 			title = title[idx+1:]
 		}
-		ctx := ""
-		if cfg != nil {
-			ctx = config.FindContextForPath(cfg, p.Collection, p.Path)
-		}
+		ctx := config.FindContextForPath(src.Cfg, p.Collection, p.Path)
 		skipped := false
 		reason := ""
 		if p.BodyLength > int64(maxBytes) {
@@ -264,6 +285,7 @@ func multiGetByGlob(s *store.Store, pattern string, maxLines, maxBytes int) []do
 			body = ""
 		}
 		out = append(out, docForMultiGet{
+			Index:       src.Name,
 			DisplayPath: p.Filepath,
 			Title:       title,
 			Body:        body,

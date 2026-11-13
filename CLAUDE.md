@@ -2,6 +2,25 @@
 
 QMD is implemented in **Go**. Use the Go CLI and avoid modifying the SQLite index directly.
 
+## Working in this checkout
+
+This repository is shared with an agent account in group `claude`. The tree and
+`.git` must stay group-writable, with a default ACL so new files stay editable
+by the owner:
+
+```sh
+chmod -R g+rwX . && setfacl -R -d -m g::rwx .
+```
+
+If a write fails, stop and ask for that command. Do not clone the repository
+elsewhere, work under `/tmp`, or report a commit that is not in this
+repository's history. Keep agent work in a registered worktree:
+
+```sh
+git worktree add .worktrees/<name> -b <branch>
+git worktree remove .worktrees/<name>
+```
+
 ## Commands
 
 ```sh
@@ -17,13 +36,14 @@ qmd context rm <path>             # Remove context
 qmd get <file>                    # Get document by path or docid (#abc123)
 qmd multi-get <pattern>           # Get multiple docs by glob or comma-separated list
 qmd status                        # Show index status and collections
-qmd update [--pull] [--full]     # Re-index all collections (--pull: git pull first)
-qmd embed                         # Generate vector embeddings (Ollama or OpenAI-compatible API)
+qmd update [--pull] [--full]     # Re-index every index; --index <name> for one (--pull: git pull first)
+qmd embed [-f] [--model <spec>]   # Embed every index; -f rebuilds, --model records a new one
 qmd search <query>                # BM25 full-text search
 qmd vsearch <query>               # Vector similarity search
 qmd query <query>                 # Hybrid search (BM25 + vector, RRF)
 qmd mcp                           # Run MCP server (stdio)
 qmd cleanup                       # Remove cache, orphaned data, vacuum DB
+qmd --version                     # Version, backend and default embed model
 ```
 
 ## Collection Management

@@ -117,6 +117,16 @@ type DocPath struct {
 
 // GetDocumentBody returns the content body for a document by collection and path.
 // fromLine is 1-based; maxLines limits output lines (0 = all).
+// DocumentExists answers whether this index holds the document, which is what a
+// federated lookup needs: a path can be parsed without being present here.
+func (s *Store) DocumentExists(collection, path string) bool {
+	var one int
+	err := s.DB.QueryRow(`
+		SELECT 1 FROM documents d WHERE d.collection = ? AND d.path = ? AND d.active = 1 LIMIT 1
+	`, collection, path).Scan(&one)
+	return err == nil
+}
+
 func (s *Store) GetDocumentBody(collection, path string, fromLine, maxLines int) (string, error) {
 	var body string
 	err := s.DB.QueryRow(`

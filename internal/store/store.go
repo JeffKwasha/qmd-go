@@ -3,8 +3,8 @@ package store
 import (
 	"database/sql"
 	"fmt"
-	"os"
-	"path/filepath"
+
+	"github.com/ba0f3/qmd-go/internal/config"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -14,28 +14,11 @@ type Store struct {
 	DBPath string
 }
 
+// GetDefaultDbPath resolves the SQLite path for a named index.
+// Deprecated: use config.DBPathFor, which additionally honours db_path in the
+// index config file (so CLI and MCP server agree on one location).
 func GetDefaultDbPath(indexName string) (string, error) {
-	if path := os.Getenv("INDEX_PATH"); path != "" {
-		return path, nil
-	}
-	if indexName == "" {
-		indexName = "index"
-	}
-
-	cacheDir := os.Getenv("XDG_CACHE_HOME")
-	if cacheDir == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", err
-		}
-		cacheDir = filepath.Join(home, ".cache")
-	}
-
-	qmdCacheDir := filepath.Join(cacheDir, "qmd")
-	if err := os.MkdirAll(qmdCacheDir, 0755); err != nil {
-		return "", err
-	}
-	return filepath.Join(qmdCacheDir, fmt.Sprintf("%s.sqlite", indexName)), nil
+	return config.DBPathFor(indexName)
 }
 
 func NewStore(dbPath string) (*Store, error) {

@@ -12,6 +12,7 @@ var cleanupCmd = &cobra.Command{
 	Short: "Remove cache and orphaned data, vacuum DB",
 	Run: func(cmd *cobra.Command, args []string) {
 		initRoot()
+		requireIndex()
 		s, err := openStore()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error opening store: %v\n", err)

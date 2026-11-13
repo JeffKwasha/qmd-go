@@ -2,6 +2,8 @@ package config
 
 import (
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -61,5 +63,70 @@ func TestLoadSaveConfig(t *testing.T) {
 		if col.Context["/"] != "root context" {
 			t.Errorf("Expected context 'root context', got '%s'", col.Context["/"])
 		}
+	}
+}
+
+func TestIndexNames(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"index.yml", "personal.yml", "work.yml", "notes.md", ServerConfigName, ".hidden.yml"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("collections: {}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Mkdir(filepath.Join(dir, "sub.yml"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("QMD_CONFIG_DIR", dir)
+
+	got, err := IndexNames()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"index", "personal", "work"}
+	if len(got) != len(want) {
+		t.Fatalf("IndexNames() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("IndexNames() = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestIndexNamesRefusesUnrenamedServerConfig(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "index.yml"), []byte("collections: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "server.yml"), []byte("servers:\n  /mcp: index\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("QMD_CONFIG_DIR", dir)
+
+	_, err := IndexNames()
+	if err == nil || !strings.Contains(err.Error(), ServerConfigName) {
+		t.Fatalf("a server config under the old name was walked as an index: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, "server.yml"), []byte("collections: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := IndexNames()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0] != "index" || got[1] != "server" {
+		t.Fatalf("an index named server was not read as one: %v", got)
+	}
+}
+
+func TestIndexNamesMissingDir(t *testing.T) {
+	t.Setenv("QMD_CONFIG_DIR", filepath.Join(t.TempDir(), "absent"))
+	got, err := IndexNames()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Errorf("IndexNames() = %v, want none", got)
 	}
 }

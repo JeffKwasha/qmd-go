@@ -77,6 +77,58 @@ QMD exposes an MCP (Model Context Protocol) server for integration with Claude, 
 
 **Resources:** Documents are readable via `qmd://` URIs (e.g. `qmd://collection/path/to/file.md`).
 
+**Shared HTTP server (one process, many clients)**
+
+`qmd mcp` defaults to stdio — one child process per client. With `--http` it serves
+several named indexes over MCP streamable HTTP, so a single process can back every
+agent on the machine:
+
+```bash
+qmd mcp --http --addr 127.0.0.1:8422     # config: ~/.config/qmd/CONFIG.yml
+```
+
+`CONFIG.yml` maps URL paths to named indexes and gates access with bearer keys:
+
+```yaml
+servers:
+  /mcp: index              # conventional endpoint (same index as /mcp/shared)
+  /mcp/shared: index       # project notes, docs
+  /mcp/personal: personal  # private index
+
+auth:
+  public: [/mcp, /mcp/shared]   # reachable without a key
+  groups:                       # paths only
+    personal:
+      allow: [/mcp/personal, /mcp]
+  keys:                         # one record per key, one group each
+    - hash: "sha256:<hex>"
+      group: personal
+      label: laptop
+      expires: 2027-02-10T00:00:00Z   # optional; absent means never
+```
+
+Issue keys with the CLI rather than by hand. Only the hash is written:
+
+```bash
+qmd server key add personal --label laptop --allow /mcp/personal
+qmd server key list
+qmd server key remove sha256:ab12cd34
+qmd server check            # dead mounts, dead allow rules, expiring or expired keys
+```
+
+Public paths need no key; a key reaches only the paths its group allows.
+The same hash in two records is a startup error, not a rule about which group
+wins. Unknown paths return 404, denied requests 401 (`WWW-Authenticate: Bearer`),
+and keys are logged only as `sha256:<8>`. `GET /healthz` reports
+liveness. Keys and `public:` entries reload without a restart; adding a mount still
+needs one. Older configs that stored keys under `auth.groups.*` must move them to
+`auth.keys` by hand; see [docs/http-mcp.md](docs/http-mcp.md).
+Point any streamable-HTTP MCP client at
+`http://127.0.0.1:8422/mcp`; add `Authorization: Bearer <token>` for private indexes.
+
+Full guide: [docs/http-mcp.md](docs/http-mcp.md), which also covers adding an index
+and the filesystem exposure of the SQLite files themselves.
+
 **Claude Desktop** (`~/Library/Application Support/Claude/claude_desktop_config.json`):
 
 ```json
@@ -116,7 +168,7 @@ Or configure MCP manually in `~/.claude/settings.json`:
 - **Embeddings** – Stored in SQLite; generated via Ollama, any OpenAI-compatible API, or local GGUF (purego, no CGO)
 - **Hybrid search** – `query` combines BM25 and vector results using Reciprocal Rank Fusion (RRF)
 - **Chunking** – 800 tokens per chunk, 15% overlap (character-based in Go)
-- **Index** – `~/.cache/qmd/index.sqlite` (or `INDEX_PATH`)
+- **Index** – `db_path` in `~/.config/qmd/<index>.yml`, else `QMD_DB_DIR/<index>.sqlite`, else `INDEX_PATH`, else `~/.cache/qmd/index.sqlite`
 
 ```
 Query ──┬──► BM25 (FTS5) ──► Ranked list

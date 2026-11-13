@@ -5,68 +5,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/ba0f3/qmd-go/internal/config"
-	"github.com/ba0f3/qmd-go/internal/llm"
-	"github.com/ba0f3/qmd-go/internal/store"
 	"github.com/spf13/cobra"
 )
-
-const rrfK = 60
-
-// hybridResult is a merged result with RRF score.
-type hybridResult struct {
-	Filepath    string
-	DisplayPath string
-	Title       string
-	Body        string
-	Hash        string
-	Score       float64
-}
-
-// reciprocalRankFusion merges FTS and vector results by filepath using RRF.
-func reciprocalRankFusion(fts []store.SearchResult, vec []store.VecSearchResult, limit int) []hybridResult {
-	scores := make(map[string]*hybridResult)
-	for rank, r := range fts {
-		rrf := 1.0 / (float64(rrfK) + float64(rank) + 1)
-		if scores[r.Filepath] == nil {
-			scores[r.Filepath] = &hybridResult{
-				Filepath: r.Filepath, DisplayPath: r.DisplayPath, Title: r.Title, Body: r.Body, Hash: r.Hash, Score: rrf,
-			}
-		} else {
-			scores[r.Filepath].Score += rrf
-		}
-	}
-	for rank, r := range vec {
-		rrf := 1.0 / (float64(rrfK) + float64(rank) + 1)
-		if scores[r.Filepath] == nil {
-			scores[r.Filepath] = &hybridResult{
-				Filepath: r.Filepath, DisplayPath: r.DisplayPath, Title: r.Title, Body: r.Body, Hash: r.Hash, Score: rrf,
-			}
-		} else {
-			scores[r.Filepath].Score += rrf
-		}
-	}
-	// Sort by score descending and take top limit
-	var list []*hybridResult
-	for _, v := range scores {
-		list = append(list, v)
-	}
-	for i := 0; i < len(list); i++ {
-		for j := i + 1; j < len(list); j++ {
-			if list[j].Score > list[i].Score {
-				list[i], list[j] = list[j], list[i]
-			}
-		}
-	}
-	if limit <= 0 || limit > len(list) {
-		limit = len(list)
-	}
-	out := make([]hybridResult, 0, limit)
-	for i := 0; i < limit && i < len(list); i++ {
-		out = append(out, *list[i])
-	}
-	return out
-}
 
 var queryCmd = &cobra.Command{
 	Use:   "query [query]",
@@ -83,75 +23,33 @@ var queryCmd = &cobra.Command{
 		lineNumbers, _ := cmd.Flags().GetBool("line-numbers")
 		format := getFormatFlag(cmd)
 
-		s, err := openStore()
+		sources, err := resolveSources()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error opening store: %v\n", err)
+			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
-		defer s.Close()
+		defer closeSources(sources)
 
 		fetchLimit := limit * 4
 		if fetchLimit < 20 {
 			fetchLimit = 20
 		}
-
-		// 1) BM25
-		ftsResults, err := s.SearchFTS(query, fetchLimit, collection)
+		hits, err := runHybrid(sources, query, fetchLimit, collection, minScore)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Search failed: %v\n", err)
 			os.Exit(1)
 		}
-
-		var vecResults []store.VecSearchResult
-		var hasVec int
-		_ = s.DB.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='embedding_blobs'`).Scan(&hasVec)
-		if hasVec > 0 {
-			model := os.Getenv("QMD_EMBED_MODEL")
-			if model == "" {
-				model = llm.DefaultEmbedModel()
-			}
-			client, err := llm.NewEmbedClient(model)
-			if err == nil {
-				formatted := formatQueryForEmbedding(query)
-				result, err := client.Embed(formatted)
-				if err == nil {
-					vecResults, err = s.SearchVectorsBrute(result.Embedding, fetchLimit)
-					if err != nil {
-						vecResults = nil
-					}
-				}
-			}
+		if len(hits) > limit {
+			hits = hits[:limit]
 		}
-
-		// 2) Merge with RRF
-		merged := reciprocalRankFusion(ftsResults, vecResults, limit)
-
-		if len(merged) == 0 {
+		if len(hits) == 0 {
 			fmt.Println("No results found.")
 			fmt.Fprintln(os.Stderr, "Tip: Run 'qmd collection add' and 'qmd update' to index documents; run 'qmd embed' for vector search.")
 			return
 		}
-
-		cfg, _ := config.LoadConfig()
-		var rows []SearchOutputRow
-		for _, r := range merged {
-			if r.Score < minScore {
-				continue
-			}
-			ctx := ""
-			if cfg != nil {
-				col, path := parseVirtualPath(r.Filepath)
-				if col != "" {
-					ctx = config.FindContextForPath(cfg, col, path)
-				}
-			}
-			body := r.Body
-			if !full && len(body) > 500 {
-				body = body[:500] + "..."
-			}
-			rows = append(rows, SearchOutputRow{
-				Docid: docid(r.Hash), Filepath: r.Filepath, Title: r.Title, Body: body, Score: r.Score, Context: ctx, Full: full,
-			})
+		rows := make([]SearchOutputRow, 0, len(hits))
+		for _, h := range hits {
+			rows = append(rows, rowFromHit(h, full, len(sources) > 1))
 		}
 		WriteSearchOutput(rows, format, full, lineNumbers)
 	},

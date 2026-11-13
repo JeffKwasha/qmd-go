@@ -129,8 +129,10 @@ type VecSearchResult struct {
 
 // SearchVectorsBrute does brute-force cosine similarity search over embedding_blobs.
 // queryEmbedding must be the same dimension as stored embeddings. Returns results sorted by score descending.
-func (s *Store) SearchVectorsBrute(queryEmbedding []float32, limit int) ([]VecSearchResult, error) {
-	rows, err := s.DB.Query(`
+func (s *Store) SearchVectorsBrute(queryEmbedding []float32, limit int, collection string) ([]VecSearchResult, error) {
+	// The collection filter belongs in the query: the caller's limit must count
+	// rows of that collection, not rows that survive afterwards.
+	query := `
 		SELECT eb.hash_seq, eb.embedding,
 			'qmd://' || d.collection || '/' || d.path AS filepath,
 			d.collection || '/' || d.path AS display_path,
@@ -138,8 +140,13 @@ func (s *Store) SearchVectorsBrute(queryEmbedding []float32, limit int) ([]VecSe
 		FROM embedding_blobs eb
 		JOIN content_vectors cv ON cv.hash || '_' || cv.seq = eb.hash_seq
 		JOIN documents d ON d.hash = cv.hash AND d.active = 1
-		JOIN content ON content.hash = d.hash
-	`)
+		JOIN content ON content.hash = d.hash`
+	var args []any
+	if collection != "" {
+		query += ` WHERE d.collection = ?`
+		args = append(args, collection)
+	}
+	rows, err := s.DB.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -217,4 +224,24 @@ func cosineSimilarity(a, b []float32) float64 {
 		return 0
 	}
 	return dot / (math.Sqrt(normA) * math.Sqrt(normB))
+}
+
+// EmbeddingModels lists the distinct models recorded for stored vectors, sorted.
+// A non-empty result that does not match the configured model means the index
+// holds vectors from another model, which cannot be compared by dimension.
+func (s *Store) EmbeddingModels() ([]string, error) {
+	rows, err := s.DB.Query(`SELECT DISTINCT model FROM content_vectors WHERE model <> '' ORDER BY model`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var models []string
+	for rows.Next() {
+		var m string
+		if err := rows.Scan(&m); err != nil {
+			return nil, err
+		}
+		models = append(models, m)
+	}
+	return models, rows.Err()
 }
