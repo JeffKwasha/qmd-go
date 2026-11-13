@@ -36,6 +36,7 @@ package main
 // then QMD_DB_DIR, INDEX_PATH, XDG cache dir).
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -107,55 +108,10 @@ type authSection struct {
 // who may reach them. Index content configs (index.yml, personal.yml) stay
 // separate — they are read by the CLI too.
 type serverConfig struct {
-	Servers map[string]mountTargets `yaml:"servers"` // URL path -> one or more indexes
-	Auth    authSection             `yaml:"auth"`
+	Servers map[string]string `yaml:"servers"` // URL path -> named index ("" = default)
+	Auth    authSection       `yaml:"auth"`
 
 	byHash map[string]*keyEntry
-}
-
-// mountTargets is the index list behind one mount. A scalar names one index;
-// a sequence names several, which the tools search as one answer.
-type mountTargets []string
-
-func (m *mountTargets) UnmarshalYAML(node *yaml.Node) error {
-	switch node.Kind {
-	case yaml.ScalarNode:
-		var name string
-		if err := node.Decode(&name); err != nil {
-			return err
-		}
-		name = strings.TrimSpace(name)
-		if name == "" {
-			*m = mountTargets{"index"}
-			return nil
-		}
-		*m = mountTargets{name}
-		return nil
-	case yaml.SequenceNode:
-		var names []string
-		if err := node.Decode(&names); err != nil {
-			return err
-		}
-		out := make(mountTargets, 0, len(names))
-		seen := make(map[string]bool, len(names))
-		for _, name := range names {
-			name = strings.TrimSpace(name)
-			if name == "" {
-				return fmt.Errorf("a mount index name is empty; every entry must name an index")
-			}
-			if seen[name] {
-				return fmt.Errorf("index %q is listed twice for one mount", name)
-			}
-			seen[name] = true
-			out = append(out, name)
-		}
-		if len(out) == 0 {
-			out = mountTargets{"index"}
-		}
-		*m = out
-		return nil
-	}
-	return fmt.Errorf("a mount names an index (\"/mcp: public\") or a list (\"/mcp: [public, private]\")")
 }
 
 // normalizePath is idempotent: one path has one stored spelling, so two mounts
@@ -191,7 +147,7 @@ func parseServerConfig(data []byte, path string) (*serverConfig, error) {
 		raw = append(raw, p)
 	}
 	sort.Strings(raw)
-	normalized := make(map[string]mountTargets, len(sc.Servers))
+	normalized := make(map[string]string, len(sc.Servers))
 	seen := make(map[string]string, len(sc.Servers))
 	for _, p := range raw {
 		if strings.TrimSpace(p) == "" {
@@ -206,11 +162,7 @@ func parseServerConfig(data []byte, path string) (*serverConfig, error) {
 				path, other, p, n)
 		}
 		seen[n] = p
-		targets := sc.Servers[p]
-		if len(targets) == 0 {
-			targets = mountTargets{"index"}
-		}
-		normalized[n] = targets
+		normalized[n] = sc.Servers[p]
 	}
 	sc.Servers = normalized
 	for i, p := range sc.Auth.Public {
@@ -463,12 +415,14 @@ func validateMountIndexes(sc *serverConfig, path string) error {
 	}
 	sort.Strings(mounts)
 	for _, p := range mounts {
-		for _, name := range sc.Servers[p] {
-			cfgPath := filepath.Join(dir, name+".yml")
-			if _, err := os.Stat(cfgPath); err != nil {
-				return fmt.Errorf("server config %s: mount %s points at index %q, which has no config at %s",
-					path, p, name, cfgPath)
-			}
+		name := sc.Servers[p]
+		if name == "" {
+			name = "index"
+		}
+		cfgPath := filepath.Join(dir, name+".yml")
+		if _, err := os.Stat(cfgPath); err != nil {
+			return fmt.Errorf("server config %s: mount %s points at index %q, which has no config at %s",
+				path, p, name, cfgPath)
 		}
 	}
 	return nil
@@ -498,6 +452,54 @@ func isPublic(sc *serverConfig, path string) bool {
 		}
 	}
 	return false
+}
+
+// reachableIndexes is the set of indexes one caller may search: the indexes of
+// every public mount, plus the indexes of the mounts its key's group allows.
+// A federated answer is built from this set, so access is decided per caller
+// rather than per mount: an anonymous request to a mount that also names a
+// private index still sees only the public indexes.
+func reachableIndexes(sc *serverConfig, key string) []string {
+	seen := make(map[string]bool)
+	add := func(path string) {
+		name, ok := sc.Servers[normalizePath(path)]
+		if !ok {
+			return
+		}
+		if name == "" {
+			name = "index"
+		}
+		seen[name] = true
+	}
+	for _, p := range sc.Auth.Public {
+		add(p)
+	}
+	if e, ok := sc.lookup(key); ok {
+		if g, ok := sc.Auth.Groups[e.Group]; ok {
+			for _, p := range g.Allow {
+				add(p)
+			}
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for name := range seen {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// indexSetKey carries the caller's index set from the middleware to the MCP
+// handler, which is chosen per request from it.
+type indexSetKey struct{}
+
+func withIndexSet(r *http.Request, indexes []string) *http.Request {
+	return r.WithContext(context.WithValue(r.Context(), indexSetKey{}, indexes))
+}
+
+func indexesFromRequest(r *http.Request) []string {
+	indexes, _ := r.Context().Value(indexSetKey{}).([]string)
+	return indexes
 }
 
 func sha256Hex(s string) string {
@@ -580,7 +582,7 @@ type authState struct {
 	// middleware must decide 404 from the same set the mux routes from. A
 	// reloaded servers map is only compared against it to warn about the
 	// restart a mount change needs.
-	mounted map[string]mountTargets
+	mounted map[string]string
 
 	mu   sync.Mutex
 	hash string
@@ -641,19 +643,13 @@ func (a *authState) current() *serverConfig {
 	return sc
 }
 
-func sameMounts(a, b map[string]mountTargets) bool {
+func sameMounts(a, b map[string]string) bool {
 	if len(a) != len(b) {
 		return false
 	}
 	for k, v := range a {
-		bv, ok := b[k]
-		if !ok || len(bv) != len(v) {
+		if bv, ok := b[k]; !ok || bv != v {
 			return false
-		}
-		for i := range v {
-			if bv[i] != v[i] {
-				return false
-			}
 		}
 	}
 	return true
@@ -681,13 +677,22 @@ func authMiddleware(state *authState, next http.Handler) http.Handler {
 			return
 		}
 		if isPublic(sc, path) {
-			next.ServeHTTP(w, r)
+			// A public path needs no key, but a valid key still widens the
+			// answer to the indexes it was granted: that is what "search every
+			// database my key allows" means when the endpoint is also public.
+			indexes := reachableIndexes(sc, "")
+			if key := bearerToken(r); key != "" {
+				if e, ok := sc.lookup(key); ok && !e.expired(time.Now()) {
+					indexes = reachableIndexes(sc, key)
+				}
+			}
+			next.ServeHTTP(w, withIndexSet(r, indexes))
 			return
 		}
 		key := bearerToken(r)
 		if keyAllows(sc, key, path) {
 			log.Printf("qmd mcp auth: allow %s key=%s %s", r.Method, keyFingerprint(key), path)
-			next.ServeHTTP(w, r)
+			next.ServeHTTP(w, withIndexSet(r, reachableIndexes(sc, key)))
 			return
 		}
 		log.Printf("qmd mcp auth: deny %s key=%s %s from %s", r.Method, keyFingerprint(key), path, r.RemoteAddr)
@@ -716,55 +721,79 @@ func runMCPHTTP(addr, serverCfgPath string) error {
 	sort.Strings(paths)
 
 	mux := http.NewServeMux()
-	// One store per index, shared by every mount that names it. One MCP server
-	// per mount, because a mount's tools search exactly the indexes it names and
-	// merge their answers by rank.
+	// One store per index, shared by every mount that names it, and one MCP
+	// server per index set. The set is the caller's, computed per request from
+	// the mounts it may reach, so a single mount can answer from several indexes
+	// for a key and from one for an anonymous client.
 	stores := make(map[string]*store.Store)
 	defer func() {
 		for _, st := range stores {
 			_ = st.Close()
 		}
 	}()
-	openSource := func(name string) (indexSource, error) {
-		if st, ok := stores[name]; ok {
-			cfg, _ := config.LoadConfigFor(name)
-			return indexSource{Name: name, Store: st, Cfg: cfg}, nil
+	openIndex := func(name string) error {
+		if _, ok := stores[name]; ok {
+			return nil
 		}
 		dbPath, err := config.DBPathFor(name)
 		if err != nil {
-			return indexSource{}, err
+			return err
 		}
 		st, err := store.NewStore(dbPath)
 		if err != nil {
-			return indexSource{}, fmt.Errorf("index %q (%s): %w", name, dbPath, err)
+			return fmt.Errorf("index %q (%s): %w", name, dbPath, err)
 		}
 		stores[name] = st
-		cfg, _ := config.LoadConfigFor(name)
 		log.Printf("qmd mcp: index %q -> %s", name, dbPath)
-		return indexSource{Name: name, Store: st, Cfg: cfg}, nil
+		return nil
 	}
-	byMount := make(map[string]*mcp.Server)
+	for _, name := range sc.Servers {
+		if name == "" {
+			name = "index"
+		}
+		if err := openIndex(name); err != nil {
+			return err
+		}
+	}
+
+	var mu sync.Mutex
+	servers := make(map[string]*mcp.Server)
+	serverFor := func(indexes []string) *mcp.Server {
+		mu.Lock()
+		defer mu.Unlock()
+		key := strings.Join(indexes, "\x00")
+		if srv, ok := servers[key]; ok {
+			return srv
+		}
+		sources := make([]indexSource, 0, len(indexes))
+		for _, name := range indexes {
+			st, ok := stores[name]
+			if !ok {
+				continue
+			}
+			cfg, _ := config.LoadConfigFor(name)
+			sources = append(sources, indexSource{Name: name, Store: st, Cfg: cfg})
+		}
+		srv := newServer(sources)
+		servers[key] = srv
+		return srv
+	}
 
 	for _, p := range paths {
-		names := sc.Servers[p]
-		key := strings.Join(names, "\x00")
-		srv, ok := byMount[key]
-		if !ok {
-			sources := make([]indexSource, 0, len(names))
-			for _, name := range names {
-				src, err := openSource(name)
-				if err != nil {
-					return err
-				}
-				sources = append(sources, src)
-			}
-			srv = newServer(sources)
-			byMount[key] = srv
+		own := sc.Servers[p]
+		if own == "" {
+			own = "index"
 		}
-		h := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv }, &mcp.StreamableHTTPOptions{Stateless: true})
+		h := mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
+			indexes := indexesFromRequest(r)
+			if len(indexes) == 0 {
+				indexes = []string{own}
+			}
+			return serverFor(indexes)
+		}, &mcp.StreamableHTTPOptions{Stateless: true})
 		mux.Handle(p, h)
 		mux.Handle(p+"/", h)
-		log.Printf("qmd mcp: mount %s -> indexes %v", p, names)
+		log.Printf("qmd mcp: mount %s -> index %q", p, own)
 	}
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, "ok")

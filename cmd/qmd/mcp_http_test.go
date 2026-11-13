@@ -278,7 +278,7 @@ auth:
 		sort.Strings(paths)
 		mux := http.NewServeMux()
 		for _, p := range paths {
-			name := strings.Join(sc.Servers[p], ",")
+			name := sc.Servers[p]
 			h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				fmt.Fprint(w, name)
 			})
@@ -1000,7 +1000,7 @@ auth:
 	// The router is built once, from the startup mounts.
 	mux := http.NewServeMux()
 	for path, idx := range sc.Servers {
-		name := strings.Join(idx, ",")
+		name := idx
 		h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, name) })
 		mux.Handle(path, h)
 		mux.Handle(path+"/", h)

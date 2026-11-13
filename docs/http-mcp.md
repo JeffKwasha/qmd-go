@@ -42,10 +42,9 @@ anywhere, and only the default name is special.
   hint naming the indexes to choose from. Writers (`collection add`, `context`)
   still create the file.
 - A **collection** is a directory tree inside one index.
-- A **mount** is a URL path served by the HTTP server, pointing at one index or
-  several. Several mounts may point at the same index, for example `/mcp` as an
-  alias of `/mcp/shared`. Aliases share one database handle; a mount that names
-  several indexes answers one request from all of them. A mount
+- A **mount** is a URL path served by the HTTP server, pointing at one index.
+  Several mounts may point at the same index, for example `/mcp` as an alias of
+  `/mcp/shared`. Aliases share one database handle. A mount
   path is normalized (leading `/`, no trailing slashes), so one path is mounted
   once; a path the router would rewrite before dispatch (a `.` or `..` segment,
   a doubled slash between segments) is refused when the config loads, as is a
@@ -118,39 +117,53 @@ ExecStart=/mnt/pool/tools/bin/qmd update
 ExecStart=/mnt/pool/tools/bin/qmd embed
 ```
 
-## Federated mounts
+## What one request searches
 
-A mount may name a list of indexes instead of one:
+A mount points at one index, but a request answers from every index the caller
+may reach:
+
+- an anonymous caller gets the indexes of the mounts listed in `auth.public`;
+- a caller with a live key gets those public indexes plus the indexes behind the
+  paths its group's `allow` names.
+
+So a client asks once and gets every database it was granted, without knowing
+which index holds what:
 
 ```yaml
 servers:
-  /mcp: [public, private]   # one request, both indexes, one merged answer
+  /mcp: public
   /mcp/pub: public
   /mcp/private: private
+
+auth:
+  public: [/mcp, /mcp/pub]        # anonymous: the public index only
+  groups:
+    hermes-private:
+      allow: [/mcp, /mcp/private] # with this key: public + private
 ```
 
-A client that may reach the mount gets results from every index in it, without
-asking each one and comparing numbers itself. Merging is by **rank**, never by
-score:
+An anonymous request to `/mcp` searches `public` only. The same URL with a key
+of that group searches both. A key never reaches an index its group was not
+granted, and `/mcp/private` still answers `401` without a key.
+
+Merging is by **rank**, never by score:
 
 - BM25 scores depend on the corpus of the index that produced them, so a 12 in
   one index and a 7 in another say nothing about their order.
-- Vector scores depend on the embedding model, and two indexes may legitimately
-  use different models. The query is therefore embedded once per index, with
-  that index's own `embed_model`, and the hit lists are fused afterwards.
+- Vector scores depend on the embedding model, and two indexes may use different
+  models. The query is embedded once per index, with that index's own
+  `embed_model`, and the hit lists are fused afterwards.
 
 Fusion is reciprocal rank fusion (`k=60`). The top result is reported as 100%
 and the rest relative to it; that number is a ranking, not a confidence. Every
 result carries its `index` name, and the CLI prefixes it (`public:qmd://...`)
-whenever more than one index answered. A single index keeps its own scores, so
-nothing changes for a single-index setup.
+whenever more than one index answered. A single-index answer keeps its own
+scores, so nothing changes for a single-index setup.
 
-Access is per mount, and a federated mount exposes the union: if `/mcp` names
-`private`, then everyone who can reach `/mcp` can read `private`, whether or not
-the request carries a key. Do not list a private index in a mount that is also
-in `auth.public`. `server check` validates each named index and exits nonzero if
-one has no `<name>.yml`.
+The CLI does the same thing by directory: with no `--index` and no `index.yml`,
+`search`, `vsearch`, `query`, `get` and `multi-get` read every index there.
 
+## The key file
 ## The key file
 
 ```yaml

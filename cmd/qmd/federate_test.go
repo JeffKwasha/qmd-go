@@ -1,7 +1,6 @@
 package main
 
 import (
-	"strings"
 	"testing"
 )
 
@@ -68,36 +67,47 @@ func TestFuseListsScoresFallWithRank(t *testing.T) {
 	}
 }
 
-func TestParseMountTargets(t *testing.T) {
-	cases := []struct {
-		name string
-		body string
-		want []string
-	}{
-		{"scalar", "/mcp: public", []string{"public"}},
-		{"scalar empty", "/mcp:", []string{"index"}},
-		{"list", "/mcp: [public, private]", []string{"public", "private"}},
-		{"empty list", "/mcp: []", []string{"index"}},
-	}
-	for _, tc := range cases {
-		sc := parseYAML(t, "servers:\n  "+tc.body+"\nauth:\n  public: [/mcp]\n")
-		got := sc.Servers["/mcp"]
-		if len(got) != len(tc.want) {
-			t.Fatalf("%s: got %v, want %v", tc.name, got, tc.want)
-		}
-		for i := range tc.want {
-			if got[i] != tc.want[i] {
-				t.Fatalf("%s: got %v, want %v", tc.name, got, tc.want)
-			}
-		}
+func TestReachableIndexesFollowGrants(t *testing.T) {
+	body := `servers:
+  /mcp: public
+  /mcp/pub: public
+  /mcp/private: private
+auth:
+  public: [/mcp, /mcp/pub]
+  groups:
+    hermes-private:
+      allow: [/mcp, /mcp/pub, /mcp/private]
+  keys:
+    - hash: "` + hashKey("key") + `"
+      group: hermes-private
+`
+	sc := parseYAML(t, body)
+
+	anon := reachableIndexes(sc, "")
+	if len(anon) != 1 || anon[0] != "public" {
+		t.Errorf("anonymous indexes = %v, want [public]", anon)
 	}
 
-	if _, err := parseServerConfig([]byte("servers:\n  /mcp: [public, public]\nauth:\n"),
-		"test.yml"); err == nil || !strings.Contains(err.Error(), "twice") {
-		t.Errorf("duplicate index in a mount list: %v", err)
+	keyed := reachableIndexes(sc, "key")
+	if len(keyed) != 2 || keyed[0] != "private" || keyed[1] != "public" {
+		t.Errorf("keyed indexes = %v, want [private public]", keyed)
 	}
-	if _, err := parseServerConfig([]byte("servers:\n  /mcp: [public, \"\"]\nauth:\n"),
-		"test.yml"); err == nil {
-		t.Error("empty index name in a mount list was accepted")
+
+	// A key for another group reaches only the public indexes.
+	other := parseYAML(t, `servers:
+  /mcp: public
+  /mcp/private: private
+auth:
+  public: [/mcp]
+  groups:
+    hr:
+      allow: [/mcp]
+  keys:
+    - hash: "`+hashKey("hr-key")+`"
+      group: hr
+`)
+	got := reachableIndexes(other, "hr-key")
+	if len(got) != 1 || got[0] != "public" {
+		t.Errorf("limited key indexes = %v, want [public]", got)
 	}
 }
