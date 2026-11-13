@@ -37,33 +37,29 @@ var getCmd = &cobra.Command{
 		}
 
 		initRoot()
-		requireIndex()
-		s, err := openStore()
+		sources, err := resolveSources()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error opening store: %v\n", err)
+			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
-		defer s.Close()
+		defer closeSources(sources)
+		sources, input = indexPrefix(sources, input)
 
-		collection, path := resolveInputToDoc(s, input)
-		if collection == "" && path == "" {
+		src, collection, path, ok := findDoc(sources, input)
+		if !ok {
 			fmt.Fprintf(os.Stderr, "Document not found: %s\n", input)
 			os.Exit(1)
 		}
 
-		body, err := s.GetDocumentBody(collection, path, fromLine, maxLines)
+		body, err := src.Store.GetDocumentBody(collection, path, fromLine, maxLines)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Document not found: %s\n", input)
 			os.Exit(1)
 		}
 
-		cfg, _ := config.LoadConfig()
-		if cfg != nil {
-			ctx := config.FindContextForPath(cfg, collection, path)
-			if ctx != "" {
-				fmt.Println("Folder Context: " + ctx)
-				fmt.Println("---")
-			}
+		if ctx := config.FindContextForPath(src.Cfg, collection, path); ctx != "" {
+			fmt.Println("Folder Context: " + ctx)
+			fmt.Println("---")
 		}
 		if lineNumbers {
 			body = addLineNumbers(body, fromLine)

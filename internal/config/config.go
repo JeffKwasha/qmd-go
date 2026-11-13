@@ -104,7 +104,18 @@ func EnsureConfigDir() error {
 	return os.MkdirAll(dir, 0755)
 }
 
+// IsReservedIndexName reports whether name is the server config file, or the
+// pre-rename name of it. Neither can be an index: reading one as an index would
+// create an empty database behind mounts and keys.
+func IsReservedIndexName(name string) bool {
+	name = strings.TrimSuffix(name, ".yml")
+	return name == strings.TrimSuffix(ServerConfigName, ".yml") || name == strings.TrimSuffix(legacyServerConfigName, ".yml")
+}
+
 func LoadConfig() (*Config, error) {
+	if IsReservedIndexName(CurrentIndexName) {
+		return nil, fmt.Errorf("%s is the server config, not an index; choose --index <name>", CurrentIndexName+".yml")
+	}
 	path, err := GetConfigFilePath()
 	if err != nil {
 		return nil, err
@@ -122,6 +133,9 @@ func LoadConfig() (*Config, error) {
 func LoadIndexConfig(indexName string) (*Config, error) {
 	if indexName == "" {
 		indexName = "index"
+	}
+	if IsReservedIndexName(indexName) {
+		return nil, fmt.Errorf("%s.yml is the server config, not an index; choose --index <name>", indexName)
 	}
 	dir, err := GetConfigDir()
 	if err != nil {
@@ -161,12 +175,15 @@ func HasIndexConfig(indexName string) bool {
 // long-running processes (e.g. an MCP server exposing several indexes at once)
 // where the global would be wrong for all but one index.
 func LoadConfigFor(indexName string) (*Config, error) {
+	if indexName == "" {
+		indexName = "index"
+	}
+	if IsReservedIndexName(indexName) {
+		return nil, fmt.Errorf("%s.yml is the server config, not an index; choose --index <name>", indexName)
+	}
 	dir, err := GetConfigDir()
 	if err != nil {
 		return nil, err
-	}
-	if indexName == "" {
-		indexName = "index"
 	}
 	return loadConfigFile(filepath.Join(dir, indexName+".yml"))
 }
@@ -187,6 +204,10 @@ func loadConfigFile(path string) (*Config, error) {
 	if cfg.Collections == nil {
 		cfg.Collections = make(map[string]Collection)
 	}
+	if cfg.DBPath != "" && !filepath.IsAbs(cfg.DBPath) {
+		return nil, fmt.Errorf("%s: db_path %q is relative; use an absolute path so every user and service opens one database",
+			path, cfg.DBPath)
+	}
 	return &cfg, nil
 }
 
@@ -199,7 +220,11 @@ func DBPathFor(indexName string) (string, error) {
 	if indexName == "" {
 		indexName = "index"
 	}
-	if cfg, err := LoadConfigFor(indexName); err == nil && cfg.DBPath != "" {
+	cfg, err := LoadConfigFor(indexName)
+	if err != nil {
+		return "", err
+	}
+	if cfg.DBPath != "" {
 		return cfg.DBPath, nil
 	}
 	if dir := os.Getenv("QMD_DB_DIR"); dir != "" {

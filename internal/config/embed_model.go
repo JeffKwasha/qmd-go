@@ -100,15 +100,33 @@ func SetEmbedModel(indexName, model string) (bool, error) {
 	return true, writeNode(path, &doc)
 }
 
+// writeNode replaces the file through a temporary sibling: the running server
+// re-reads index configs, and must never see a truncated one.
 func writeNode(path string, doc *yaml.Node) error {
 	out, err := yaml.Marshal(doc)
 	if err != nil {
 		return err
 	}
-	info, err := os.Stat(path)
 	mode := os.FileMode(0o644)
-	if err == nil {
+	if info, err := os.Stat(path); err == nil {
 		mode = info.Mode().Perm()
 	}
-	return os.WriteFile(path, out, mode)
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }()
+	if _, err := tmp.Write(out); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(mode); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
 }

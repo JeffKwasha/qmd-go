@@ -48,3 +48,21 @@ func TestLoadIndexConfigRefusesMissingIndex(t *testing.T) {
 		t.Errorf("LoadConfig must tolerate a missing file: %v", err)
 	}
 }
+
+func TestReservedIndexNames(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("QMD_CONFIG_DIR", dir)
+	for _, name := range []string{ServerConfigName, legacyServerConfigName} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("servers: {}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range []string{"CONFIG", "server"} {
+		if _, err := LoadIndexConfig(name); err == nil {
+			t.Errorf("%s was read as an index", name)
+		}
+		if _, err := LoadConfigFor(name); err == nil {
+			t.Errorf("%s was loaded as an index", name)
+		}
+	}
+}

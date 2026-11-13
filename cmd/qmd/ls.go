@@ -13,28 +13,36 @@ import (
 
 // printIndexes lists every index in the config directory with its database and
 // collections, which is what `qmd ls` means when there is no default index.
-func printIndexes(names []string) {
+func printIndexes(names []string) bool {
+	ok := true
 	dir, _ := config.GetConfigDir()
 	fmt.Printf("Indexes in %s:\n", dir)
 	for _, name := range names {
 		dbPath, err := config.DBPathFor(name)
 		if err != nil {
 			fmt.Printf("\n  %s  (no database path: %v)\n", name, err)
+			ok = false
 			continue
 		}
 		fmt.Printf("\n  %s  %s\n", name, dbPath)
 		cfg, err := config.LoadConfigFor(name)
 		if err != nil {
 			fmt.Printf("    cannot read config: %v\n", err)
+			ok = false
 			continue
 		}
 		if len(cfg.Collections) == 0 {
 			fmt.Println("    no collections")
 			continue
 		}
+		if _, err := os.Stat(dbPath); err != nil {
+			fmt.Println("    (not built; run qmd update)")
+			continue
+		}
 		s, err := store.NewStore(dbPath)
 		if err != nil {
 			fmt.Printf("    cannot open database: %v\n", err)
+			ok = false
 			continue
 		}
 		collections := make([]string, 0, len(cfg.Collections))
@@ -49,6 +57,7 @@ func printIndexes(names []string) {
 		}
 		_ = s.Close()
 	}
+	return ok
 }
 
 var lsCmd = &cobra.Command{
@@ -61,23 +70,30 @@ var lsCmd = &cobra.Command{
 		// do, since listing is its whole job.
 		if len(args) == 0 && !rootCmd.PersistentFlags().Changed("index") && !config.HasIndexConfig("index") {
 			if names, err := config.IndexNames(); err == nil && len(names) > 0 {
-				printIndexes(names)
+				if !printIndexes(names) {
+					os.Exit(1)
+				}
 				return
 			}
 		}
 		requireIndex()
-		s, err := openStore()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error opening store: %v\n", err)
-			return
-		}
-		defer s.Close()
-
 		cfg, err := config.LoadConfig()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
-			return
+			os.Exit(1)
 		}
+		if dbPath, err := config.DBPathFor(getIndexName()); err == nil {
+			if _, err := os.Stat(dbPath); err != nil {
+				fmt.Printf("Index %q (%s): not built; run qmd update\n", getIndexName(), dbPath)
+				return
+			}
+		}
+		s, err := openStore()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error opening store: %v\n", err)
+			os.Exit(1)
+		}
+		defer s.Close()
 
 		if len(args) == 0 || args[0] == "" {
 			if len(cfg.Collections) == 0 {
@@ -115,7 +131,7 @@ var lsCmd = &cobra.Command{
 
 		if _, ok := cfg.Collections[collectionName]; !ok {
 			fmt.Fprintf(os.Stderr, "Collection not found: %s\n", collectionName)
-			return
+			os.Exit(1)
 		}
 
 		sql := `SELECT d.path, d.title, d.modified_at, LENGTH(content.doc) as size

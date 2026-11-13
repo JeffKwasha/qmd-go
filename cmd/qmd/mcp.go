@@ -89,7 +89,7 @@ var mcpCmd = &cobra.Command{
 func init() {
 	mcpCmd.Flags().Bool("http", false, "Serve over MCP streamable HTTP instead of stdio")
 	mcpCmd.Flags().String("addr", "127.0.0.1:8422", "HTTP listen address (with --http)")
-	mcpCmd.Flags().String("server-config", "", "Server config YAML (with --http; default <configdir>/0_qmd_server.yml)")
+	mcpCmd.Flags().String("server-config", "", "Server config YAML (with --http; default <configdir>/CONFIG.yml)")
 	rootCmd.AddCommand(mcpCmd)
 }
 

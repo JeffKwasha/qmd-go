@@ -85,11 +85,15 @@ func WriteSearchOutput(rows []SearchOutputRow, format string, full bool, lineNum
 			if r.Context != "" {
 				ctx = `,"` + strings.ReplaceAll(r.Context, `"`, `""`) + `"`
 			}
-			fmt.Printf("#%s,%.2f,%s%s\n", r.Docid, r.Score, r.Filepath, ctx)
+			file := r.Filepath
+			if r.Index != "" {
+				file = r.Index + ":" + file
+			}
+			fmt.Printf("#%s,%.2f,%s%s\n", r.Docid, r.Score, file, ctx)
 		}
 	case "csv":
 		w := csv.NewWriter(os.Stdout)
-		_ = w.Write([]string{"docid", "score", "file", "title", "context", "snippet"})
+		_ = w.Write([]string{"docid", "index", "score", "file", "title", "context", "snippet"})
 		for _, r := range rows {
 			snippet := r.Body
 			if !r.Full && len(snippet) > 500 {
@@ -97,6 +101,7 @@ func WriteSearchOutput(rows []SearchOutputRow, format string, full bool, lineNum
 			}
 			_ = w.Write([]string{
 				"#" + r.Docid,
+				r.Index,
 				strconv.FormatFloat(r.Score, 'f', 4, 64),
 				r.Filepath,
 				r.Title,

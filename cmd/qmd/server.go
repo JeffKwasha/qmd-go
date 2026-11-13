@@ -12,6 +12,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -132,6 +133,33 @@ func encodeYAML(doc *yaml.Node) ([]byte, error) {
 		return nil, err
 	}
 	return buf.Bytes(), nil
+}
+
+// writeFileAtomic replaces a file through a temporary sibling, so a reader
+// (the running server re-reads on every request) never sees a half-written
+// config and a failed write never truncates the old one.
+func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
+	if info, err := os.Stat(path); err == nil {
+		mode = info.Mode().Perm()
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(mode); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
 }
 
 func writeYAML(path string, doc *yaml.Node) error {
@@ -424,6 +452,27 @@ func checkServerConfig(path string) (problems, warnings []string, err error) {
 			}
 		}
 	}
+	if len(sc.byHash) > 0 || len(sc.Auth.Public) > 0 {
+		reachable := make(map[string]bool, len(sc.Servers))
+		for _, p := range sc.Auth.Public {
+			reachable[normalizePath(p)] = true
+		}
+		for _, g := range sc.Auth.Groups {
+			for _, a := range g.Allow {
+				reachable[normalizePath(a)] = true
+			}
+		}
+		mounts := make([]string, 0, len(sc.Servers))
+		for m := range sc.Servers {
+			mounts = append(mounts, m)
+		}
+		sort.Strings(mounts)
+		for _, m := range mounts {
+			if !reachable[m] {
+				problems = append(problems, fmt.Sprintf("mount %s is reachable by no key and no public path", m))
+			}
+		}
+	}
 	now := time.Now()
 	for _, e := range sc.byHash {
 		if !e.Issued.IsZero() && !e.Expires.IsZero() && e.Expires.Before(e.Issued) {
@@ -463,7 +512,7 @@ func expiryLabel(t time.Time) string {
 var serverCmd = &cobra.Command{
 	Use:   "server",
 	Short: "Manage the HTTP MCP server config (indexes, keys, access)",
-	Long:  "Edit ~/.config/qmd/0_qmd_server.yml: add indexes as mounts, issue and revoke bearer keys, and check for dead access rules.",
+	Long:  "Edit ~/.config/qmd/CONFIG.yml: add indexes as mounts, issue and revoke bearer keys, and check for dead access rules.",
 }
 
 var keyCmd = &cobra.Command{
@@ -596,7 +645,7 @@ func serverConfigPath(cmd *cobra.Command) (string, error) {
 }
 
 func init() {
-	serverCmd.PersistentFlags().String("server-config", "", "Server config YAML (default <configdir>/0_qmd_server.yml)")
+	serverCmd.PersistentFlags().String("server-config", "", "Server config YAML (default <configdir>/CONFIG.yml)")
 	keyAddCmd.Flags().String("label", "", "Label for the key, e.g. a device name")
 	keyAddCmd.Flags().StringArray("allow", nil, "Paths the group may use (repeatable); omit to keep existing")
 	keyAddCmd.Flags().String("expires", "", "Expiry: 30d, 720h, 2027-03-01 or RFC3339; omit for never")

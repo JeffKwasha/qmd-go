@@ -84,7 +84,18 @@ func embedIndex(name string, force bool, modelOverride string) error {
 	if err := s.EnsureEmbeddingBlobTable(); err != nil {
 		return err
 	}
+
+	client, err := llm.NewEmbedClient(model)
+	if err != nil {
+		return err
+	}
+
 	if force {
+		// A forced run destroys what is there. Ask the backend for one vector
+		// first, so a typo'd model or a dead service leaves the index intact.
+		if _, err := client.Embed("qmd embed probe"); err != nil {
+			return fmt.Errorf("backend did not answer, so the existing vectors were kept: %w", err)
+		}
 		fmt.Printf("Index %q: clearing all vectors\n", name)
 		if err := s.ClearAllEmbeddings(); err != nil {
 			return err
@@ -101,9 +112,12 @@ func embedIndex(name string, force bool, modelOverride string) error {
 		}
 	}
 
-	// Record the model in the index file, so a later run does not depend on
-	// this shell's environment and a copied database carries its own answer.
-	if strings.TrimSpace(cfg.EmbedModel) != model {
+	// The model is recorded once the run has something to show for it, so a
+	// failed run cannot pin the index to a model that never produced a vector.
+	recordModel := func() error {
+		if strings.TrimSpace(cfg.EmbedModel) == model {
+			return nil
+		}
 		changed, err := config.SetEmbedModel(name, model)
 		if err != nil {
 			return err
@@ -111,6 +125,7 @@ func embedIndex(name string, force bool, modelOverride string) error {
 		if changed {
 			fmt.Printf("Index %q: recording embed_model: %s\n", name, model)
 		}
+		return nil
 	}
 
 	hashes, err := s.GetHashesForEmbedding()
@@ -119,7 +134,7 @@ func embedIndex(name string, force bool, modelOverride string) error {
 	}
 	if len(hashes) == 0 {
 		fmt.Printf("Index %q: nothing to embed\n", name)
-		return nil
+		return recordModel()
 	}
 
 	backend := os.Getenv("QMD_EMBED_BACKEND")
@@ -129,10 +144,6 @@ func embedIndex(name string, force bool, modelOverride string) error {
 		} else {
 			backend = "api (default)"
 		}
-	}
-	client, err := llm.NewEmbedClient(model)
-	if err != nil {
-		return err
 	}
 
 	var totalChunks int
@@ -176,7 +187,7 @@ func embedIndex(name string, force bool, modelOverride string) error {
 	if failures > 0 {
 		return fmt.Errorf("%d chunk(s) failed to embed", failures)
 	}
-	return nil
+	return recordModel()
 }
 
 func init() {

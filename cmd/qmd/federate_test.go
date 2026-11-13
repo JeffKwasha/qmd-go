@@ -1,10 +1,16 @@
 package main
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/ba0f3/qmd-go/internal/store"
 )
 
 func TestFuseListsKeepsSingleIndexScores(t *testing.T) {
@@ -86,12 +92,12 @@ auth:
 `
 	sc := parseYAML(t, body)
 
-	anon := reachableIndexes(sc, "")
+	anon := reachableIndexes(sc.Servers, sc, "")
 	if len(anon) != 1 || anon[0] != "public" {
 		t.Errorf("anonymous indexes = %v, want [public]", anon)
 	}
 
-	keyed := reachableIndexes(sc, "key")
+	keyed := reachableIndexes(sc.Servers, sc, "key")
 	if len(keyed) != 2 || keyed[0] != "private" || keyed[1] != "public" {
 		t.Errorf("keyed indexes = %v, want [private public]", keyed)
 	}
@@ -109,7 +115,7 @@ auth:
     - hash: "`+hashKey("hr-key")+`"
       group: hr
 `)
-	got := reachableIndexes(other, "hr-key")
+	got := reachableIndexes(other.Servers, other, "hr-key")
 	if len(got) != 1 || got[0] != "public" {
 		t.Errorf("limited key indexes = %v, want [public]", got)
 	}
@@ -130,13 +136,13 @@ auth:
 `
 	sc := parseYAML(t, body)
 
-	if got := indexesForMount(sc, "/mcp", ""); len(got) != 0 {
+	if got := indexesForMount(sc.Servers, sc, "/mcp", ""); len(got) != 0 {
 		t.Errorf("anonymous catchall = %v, want nothing (no public index mount)", got)
 	}
-	if got := indexesForMount(sc, "/mcp", "holder-key"); len(got) != 1 || got[0] != "private" {
+	if got := indexesForMount(sc.Servers, sc, "/mcp", "holder-key"); len(got) != 1 || got[0] != "private" {
 		t.Errorf("keyed catchall = %v, want [private]", got)
 	}
-	if got := indexesForMount(sc, "/mcp/private", "holder-key"); len(got) != 1 || got[0] != "private" {
+	if got := indexesForMount(sc.Servers, sc, "/mcp/private", "holder-key"); len(got) != 1 || got[0] != "private" {
 		t.Errorf("specific mount = %v, want [private]", got)
 	}
 }
@@ -189,5 +195,162 @@ auth:
 	}
 	if rec := call("/mcp/private", "live"); rec.Code != http.StatusOK {
 		t.Errorf("keyed specific mount = %d, want 200", rec.Code)
+	}
+}
+
+func TestReloadKeepsStartupMounts(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("QMD_CONFIG_DIR", dir)
+	p := filepath.Join(dir, "CONFIG.yml")
+	startup := `servers:
+  /mcp: all
+  /mcp/hr: hr
+  /mcp/pub: pub
+auth:
+  public: [/mcp/hr, /mcp/pub]
+`
+	if err := os.WriteFile(p, []byte(startup), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sc, err := loadServerConfig(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	h := authMiddleware(newAuthState(p, sc), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = indexesFromRequest(r)
+	}))
+	serve := func(path string) []string {
+		got = nil
+		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, path, nil))
+		return got
+	}
+
+	if indexes := serve("/mcp/hr"); len(indexes) != 1 || indexes[0] != "hr" {
+		t.Fatalf("startup mount searched %v, want [hr]", indexes)
+	}
+
+	// Drop the mount from the file. The router still serves the path until a
+	// restart, so it must keep hr rather than fall back to the default index.
+	edited := `servers:
+  /mcp: all
+  /mcp/pub: pub
+auth:
+  public: [/mcp/hr, /mcp/pub]
+`
+	if err := os.WriteFile(p, []byte(edited), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if indexes := serve("/mcp/hr"); len(indexes) != 1 || indexes[0] != "hr" {
+		t.Fatalf("after removing the mount, /mcp/hr searched %v; want the startup index [hr]", indexes)
+	}
+}
+
+func TestVSearchRefusesStaleModel(t *testing.T) {
+	fakeEmbedBackend(t)
+	dir := t.TempDir()
+	t.Setenv("QMD_CONFIG_DIR", dir)
+	db := filepath.Join(dir, "x.sqlite")
+	yml := "db_path: " + db + "\nembed_model: new-model\ncollections: {}\n"
+	if err := os.WriteFile(filepath.Join(dir, "x.yml"), []byte(yml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.NewStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.EnsureEmbeddingBlobTable(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.InsertEmbedding("h", 0, 0, []float32{1, 0}, "old-model", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	sources, err := openSources([]string{"x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeSources(sources)
+
+	_, err = runVectors(sources, "query", 5, 0)
+	if err == nil {
+		t.Fatal("a stale model produced results instead of an error")
+	}
+	var mm *modelMismatch
+	if !errors.As(err, &mm) {
+		t.Fatalf("error is not a model mismatch: %v", err)
+	}
+	for _, want := range []string{"old-model", "new-model", "--force"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+}
+
+func TestFindDocSkipsIndexesWithoutTheFile(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("QMD_CONFIG_DIR", dir)
+	makeIndex := func(name, collection, docPath string) {
+		db := filepath.Join(dir, name+".sqlite")
+		yml := "db_path: " + db + "\ncollections:\n  " + collection + ":\n    path: /tmp\n    pattern: \"*.md\"\n"
+		if err := os.WriteFile(filepath.Join(dir, name+".yml"), []byte(yml), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		st, err := store.NewStore(db)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer st.Close()
+		if docPath == "" {
+			return
+		}
+		now := time.Now()
+		if err := st.InsertContent(store.HashContent("body"), "body", now); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.InsertDocument(collection, docPath, "title", store.HashContent("body"), now, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	makeIndex("alpha", "alpha", "") // no documents at all
+	makeIndex("beta", "beta", "report.md")
+
+	sources, err := openSources([]string{"alpha", "beta"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeSources(sources)
+
+	src, collection, path, ok := findDoc(sources, "qmd://beta/report.md")
+	if !ok || src.Name != "beta" || collection != "beta" || path != "report.md" {
+		t.Fatalf("findDoc = %q %q %q %v, want beta/report.md in beta", src.Name, collection, path, ok)
+	}
+	if _, _, _, ok := findDoc(sources, "qmd://beta/missing.md"); ok {
+		t.Error("a missing file resolved to an index that does not hold it")
+	}
+}
+
+func TestHealthzIsExactPathOnly(t *testing.T) {
+	sc := parseYAML(t, `servers:
+  /: all
+auth:
+  public: [/]
+`)
+	ok := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	h := authMiddleware(staticAuthState(sc), ok)
+
+	for path, want := range map[string]int{
+		"/healthz":   http.StatusOK,
+		"/healthz/":  http.StatusNotFound,
+		"/healthz/x": http.StatusNotFound,
+	} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if rec.Code != want {
+			t.Errorf("%s = %d, want %d", path, rec.Code, want)
+		}
 	}
 }

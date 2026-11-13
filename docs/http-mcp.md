@@ -98,7 +98,7 @@ unit's environment said at the time. `--model` is the way to change it:
 `qmd embed` compares `embed_model` with what `content_vectors` records and
 refuses to run when they disagree:
 
-    index "private": holds embeddings from model "jina-v5-small-text-matching" while the configured model is "embeddinggemma:300m"; run qmd embed --force to rebuild
+    index "private": holds embeddings from model "jina-v5-small-text-matching" while embed_model in the index file gives "embeddinggemma:300m"; run qmd embed --force to rebuild
 
 `--force` clears the targeted indexes' vectors and re-embeds their documents;
 with no `--index` that is every index, so narrow it when only one model changed.
@@ -153,7 +153,9 @@ Status codes:
 | credential accepted for the mount, but no index behind it is readable with it | `403` |
 
 A catchall with nothing reachable is therefore `403`, never an empty `200`: an
-empty answer must mean "nothing matched", not "nothing was allowed". A catchall
+empty answer must mean "nothing matched", not "nothing was allowed". A read
+also refuses an index whose stored vectors came from another model, with the
+same message `qmd embed` gives, rather than returning an empty list. A catchall
 only has what the other mounts grant — with `public: [/mcp]` alone and no public
 index mount, an anonymous client gets `403`, so give it one (`/mcp/pub: public`)
 or expect a key. A config in which every mount is `all` is refused at startup.
@@ -173,10 +175,11 @@ whenever more than one index answered. A single-index answer keeps its own
 scores, so nothing changes for a single-index setup.
 
 The CLI does the same thing by directory: with no `--index` and no `index.yml`,
-`search`, `vsearch`, `query`, `get` and `multi-get` read every index there.
+`search`, `vsearch`, `query`, `get` and `multi-get` read every index there, and
+each printed path carries its index (`public:qmd://pub/doc.md`). `qmd get`
+accepts that form, so a federated hit can be fetched without guessing.
+`--csv` carries the index in its own column, and `--files` prefixes the path.
 
-## The key file
-## The key file
 ## The key file
 
 ```yaml
@@ -355,8 +358,9 @@ Consequences worth stating plainly:
   `allow` list. Adding an index does not widen access by default.
 - A key's group is the only group consulted. There is no union across groups,
   because a hash may not appear twice.
-- An expired key is refused exactly like an unknown key: `401`, with an
-  `expired` line in the server log. The response does not say which.
+- An expired key is refused with `401` and an `expired` line in the server log.
+  The challenge adds `error_description="key expired"`, so a client can tell it
+  from an unknown key without reading the log.
 - `public:` is an exact path match. Wildcards are not supported.
 - A percent-encoded request path is not a second spelling of a mount. Clients
   must use the mount path exactly as written in `servers:`.
@@ -460,7 +464,7 @@ with no `<name>.yml`, duplicate hashes, a key naming a group that
 does not exist, a malformed hash, an unparseable or zero-time timestamp, two
 mounts that normalize to the same path, an empty `public:` or `allow:` entry, a
 mount at `/healthz`, a mount path with a character an HTTP route cannot carry
-(whitespace, control, or braces), a mount path the router would rewrite (a `.`
+(whitespace inside the path, control characters, or braces), a mount path the router would rewrite (a `.`
 or `..` segment, or a doubled slash between segments), and a mount path that is
 not its own URL-escaped form (any `%`, or another character that arrives
 percent-encoded).
@@ -505,5 +509,7 @@ whoever can read that file reads the private index directly:
 | Server exits on startup, a mount "points at index ... which has no config" | The mount names an index with no `<name>.yml`; fix the name or create the index |
 | Server exits on startup, "no such file or directory" | `CONFIG.yml` is missing |
 | `no index.yml in ...; choose --index a or --index b` | Ran without `--index` in a directory whose indexes have other names; the default is `index` |
+| `db_path "rel.sqlite" is relative` | Pin an absolute path; a relative one is one database per working directory |
+| `CONFIG.yml is the server config, not an index` | A read or write named the server file as an index |
 | Every path returns `401` including one you expected public | `public:` entries are matched exactly, check the leading slash |
 | Slow first search | Embedding model cold start, not auth |

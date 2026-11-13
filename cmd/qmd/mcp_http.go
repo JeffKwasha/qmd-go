@@ -4,7 +4,7 @@ package main
 //
 // One process serves several named indexes, each mounted at its own URL path,
 // and gates access with bearer keys described in the server config
-// (~/.config/qmd/0_qmd_server.yml):
+// (~/.config/qmd/CONFIG.yml):
 //
 //	servers:
 //	  /mcp: index             # conventional bare endpoint (alias of shared)
@@ -429,6 +429,9 @@ func validateMountIndexes(sc *serverConfig, path string) error {
 			return fmt.Errorf("server config %s: mount %s points at index %q, which has no config at %s",
 				path, p, name, cfgPath)
 		}
+		if _, err := config.LoadConfigFor(name); err != nil {
+			return fmt.Errorf("server config %s: mount %s: %w", path, p, err)
+		}
 	}
 	if indexMounts == 0 {
 		return fmt.Errorf("server config %s: every mount is catchall (%q); name at least one index, or a catchall has nothing to search",
@@ -474,24 +477,27 @@ const allIndexes = "all"
 // indexesForMount is what one request searches. A specific mount searches its
 // own index; a catchall mount searches everything this caller was granted,
 // which is what /mcp is for.
-func indexesForMount(sc *serverConfig, path, key string) []string {
-	own := sc.Servers[normalizePath(path)]
+func indexesForMount(mounted map[string]string, sc *serverConfig, path, key string) []string {
+	// mounted is the startup map: the router still dispatches the paths it
+	// started with, so index resolution must not follow a reloaded servers map,
+	// or editing the file would repoint a live route at another index.
+	own := mounted[normalizePath(path)]
 	if own == "" {
 		own = "index"
 	}
 	if own != allIndexes {
 		return []string{own}
 	}
-	return reachableIndexes(sc, key)
+	return reachableIndexes(mounted, sc, key)
 }
 
 // reachableIndexes is the set of indexes one caller may search: the indexes of
 // every public mount, plus the indexes of the mounts its key's group allows.
 // Catchall mounts contribute nothing here: they are a view, not an index.
-func reachableIndexes(sc *serverConfig, key string) []string {
+func reachableIndexes(mounted map[string]string, sc *serverConfig, key string) []string {
 	seen := make(map[string]bool)
 	add := func(path string) {
-		name, ok := sc.Servers[normalizePath(path)]
+		name, ok := mounted[normalizePath(path)]
 		if !ok || name == allIndexes {
 			return
 		}
@@ -687,6 +693,13 @@ func sameMounts(a, b map[string]string) bool {
 func authMiddleware(state *authState, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sc := state.current()
+		// /healthz is one exact path. Testing the normalized path would also
+		// match /healthz/ and forward it unchanged, which the mux routes to a
+		// root mount - past the key check.
+		if r.URL.Path == "/healthz" && r.URL.EscapedPath() == "/healthz" {
+			next.ServeHTTP(w, r)
+			return
+		}
 		path := normalizePath(r.URL.Path)
 		// The router matches the escaped request path; the checks below use the
 		// decoded one. Refusing requests where the two disagree keeps the index
@@ -697,16 +710,12 @@ func authMiddleware(state *authState, next http.Handler) http.Handler {
 			http.NotFound(w, r)
 			return
 		}
-		if path == "/healthz" {
-			next.ServeHTTP(w, r)
-			return
-		}
 		if _, ok := state.mounted[path]; !ok {
 			http.NotFound(w, r)
 			return
 		}
 		serve := func(key string) {
-			indexes := indexesForMount(sc, path, key)
+			indexes := indexesForMount(state.mounted, sc, path, key)
 			if len(indexes) == 0 {
 				// The credential is valid for this mount, but nothing behind it
 				// is readable with this credential. That is a scope problem, not
@@ -765,6 +774,7 @@ func runMCPHTTP(addr, serverCfgPath string) error {
 	}
 	sort.Strings(paths)
 
+	mounted := sc.Servers
 	mux := http.NewServeMux()
 	// One store per index, shared by every mount that names it, and one MCP
 	// server per index set. The set is the caller's, computed per request from
@@ -819,7 +829,11 @@ func runMCPHTTP(addr, serverCfgPath string) error {
 			if !ok {
 				continue
 			}
-			cfg, _ := config.LoadConfigFor(name)
+			cfg, err := config.LoadConfigFor(name)
+			if err != nil {
+				log.Printf("qmd mcp: index %q: %v", name, err)
+				continue
+			}
 			sources = append(sources, indexSource{Name: name, Store: st, Cfg: cfg})
 		}
 		srv := newServer(sources)
@@ -835,7 +849,7 @@ func runMCPHTTP(addr, serverCfgPath string) error {
 		h := mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
 			indexes := indexesFromRequest(r)
 			if len(indexes) == 0 {
-				indexes = indexesForMount(sc, p, "")
+				indexes = indexesForMount(mounted, sc, p, "")
 			}
 			return serverFor(indexes)
 		}, &mcp.StreamableHTTPOptions{Stateless: true})

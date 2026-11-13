@@ -22,6 +22,38 @@ import (
 
 const rrfK = 60
 
+// modelMismatch is a configuration error, not a search miss: the index's vectors
+// came from a model other than the one its file now names, so comparing them
+// with a query embedded by the current model is meaningless (0 on a dimension
+// change, plausible garbage when dimensions agree).
+type modelMismatch struct {
+	Index      string
+	Stored     string
+	Configured string
+}
+
+func (e *modelMismatch) Error() string {
+	return fmt.Sprintf("index %q holds embeddings from model %q while the configured model is %q; run qmd embed --force to rebuild",
+		e.Index, e.Stored, e.Configured)
+}
+
+// checkModel refuses a read from an index whose vectors do not match its
+// configured model. Embedding refuses the same way; a query must not answer
+// "nothing found" when the truth is "this index cannot be compared".
+func checkModel(src indexSource) error {
+	model := config.EmbedModel(src.Cfg)
+	stored, err := src.Store.EmbeddingModels()
+	if err != nil {
+		return err
+	}
+	for _, m := range stored {
+		if m != model {
+			return &modelMismatch{Index: src.Name, Stored: m, Configured: model}
+		}
+	}
+	return nil
+}
+
 type indexSource struct {
 	Name  string
 	Store *store.Store
@@ -206,7 +238,7 @@ func runFTS(sources []indexSource, query string, limit int, collection string, m
 		results, err := src.Store.SearchFTS(query, limit, collection)
 		if err != nil {
 			if firstErr == nil {
-				firstErr = err
+				firstErr = fmt.Errorf("index %q: %w", src.Name, err)
 			}
 			continue
 		}
@@ -235,6 +267,9 @@ func runVectors(sources []indexSource, query string, limit int, minScore float64
 		if !src.hasVectors() {
 			continue
 		}
+		if err := checkModel(src); err != nil {
+			return nil, err
+		}
 		client, err := llm.NewEmbedClient(config.EmbedModel(src.Cfg))
 		if err != nil {
 			if firstErr == nil {
@@ -256,11 +291,16 @@ func runVectors(sources []indexSource, query string, limit int, minScore float64
 			}
 			continue
 		}
+		// One document may contribute several chunks; the best-placed chunk is
+		// the document's rank, so the same file cannot fill the answer or add
+		// its rank twice in the fusion.
+		seen := make(map[string]bool, len(results))
 		list := make([]fusedHit, 0, len(results))
 		for _, r := range results {
-			if r.Score < minScore {
+			if r.Score < minScore || seen[r.Filepath] {
 				continue
 			}
+			seen[r.Filepath] = true
 			list = append(list, vecHit(src, r))
 		}
 		lists = append(lists, list)
@@ -277,9 +317,17 @@ func runVectors(sources []indexSource, query string, limit int, minScore float64
 func runHybrid(sources []indexSource, query string, limit int, collection string, minScore float64) ([]fusedHit, error) {
 	var lists [][]fusedHit
 	for _, src := range sources {
+		if src.hasVectors() {
+			if err := checkModel(src); err != nil {
+				return nil, err
+			}
+		}
 		one := []indexSource{src}
-		fts, _ := runFTS(one, query, limit, collection, minScore)
-		vec, _ := runVectors(one, query, limit, minScore)
+		fts, ftsErr := runFTS(one, query, limit, collection, minScore)
+		vec, vecErr := runVectors(one, query, limit, minScore)
+		if ftsErr != nil && vecErr != nil {
+			return nil, fmt.Errorf("index %q: %w", src.Name, ftsErr)
+		}
 		lists = append(lists, fuseLists([][]fusedHit{fts, vec}))
 	}
 	return fuseLists(lists), nil
@@ -315,13 +363,37 @@ func (src indexSource) hasVectors() bool {
 	return n > 0
 }
 
+// indexPrefix accepts the label the search output prints (`public:qmd://...`)
+// and narrows the search to that index. Without it, a path printed by a
+// federated search could not be fetched at all.
+func indexPrefix(sources []indexSource, input string) ([]indexSource, string) {
+	i := strings.Index(input, ":")
+	if i <= 0 {
+		return sources, input
+	}
+	name := input[:i]
+	for _, src := range sources {
+		if src.Name == name {
+			return []indexSource{src}, input[i+1:]
+		}
+	}
+	return sources, input
+}
+
 // findDoc resolves a path or docid across sources, first match wins.
 func findDoc(sources []indexSource, input string) (indexSource, string, string, bool) {
 	for _, src := range sources {
 		collection, path := resolveInputToDoc(src.Store, input)
-		if collection != "" && path != "" {
-			return src, collection, path, true
+		if collection == "" || path == "" {
+			continue
 		}
+		// resolveInputToDoc parses a qmd:// or collection/path spelling without
+		// asking this index whether it holds the file, so a federated lookup
+		// must check before accepting the first parse as a match.
+		if !src.Store.DocumentExists(collection, path) {
+			continue
+		}
+		return src, collection, path, true
 	}
 	return indexSource{}, "", "", false
 }

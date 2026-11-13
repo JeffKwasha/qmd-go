@@ -40,19 +40,21 @@ var multiGetCmd = &cobra.Command{
 		}
 
 		initRoot()
-		requireIndex()
-		s, err := openStore()
+		sources, err := resolveSources()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error opening store: %v\n", err)
+			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
-		defer s.Close()
+		defer closeSources(sources)
+		sources, pattern = indexPrefix(sources, pattern)
 
 		var docs []docForMultiGet
-		if strings.Contains(pattern, ",") && !strings.Contains(pattern, "*") && !strings.Contains(pattern, "?") {
-			docs = multiGetByList(s, strings.Split(pattern, ","), maxLines, maxBytes)
-		} else {
-			docs = multiGetByGlob(s, pattern, maxLines, maxBytes)
+		for _, src := range sources {
+			if strings.Contains(pattern, ",") && !strings.Contains(pattern, "*") && !strings.Contains(pattern, "?") {
+				docs = append(docs, multiGetByList(src.Store, strings.Split(pattern, ","), maxLines, maxBytes)...)
+			} else {
+				docs = append(docs, multiGetByGlob(src.Store, pattern, maxLines, maxBytes)...)
+			}
 		}
 
 		if len(docs) == 0 {

@@ -5,8 +5,6 @@ import (
 	"os"
 	"strings"
 
-	"github.com/ba0f3/qmd-go/internal/config"
-	"github.com/ba0f3/qmd-go/internal/llm"
 	"github.com/spf13/cobra"
 )
 
@@ -21,70 +19,57 @@ var vsearchCmd = &cobra.Command{
 	Args:  cobra.MinimumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		initRoot()
-		requireIndex()
 		query := strings.Join(args, " ")
 		limit, _ := cmd.Flags().GetInt("n")
 		minScore, _ := cmd.Flags().GetFloat64("min-score")
+		collection, _ := cmd.Flags().GetString("collection")
 		full, _ := cmd.Flags().GetBool("full")
 		lineNumbers, _ := cmd.Flags().GetBool("line-numbers")
 		format := getFormatFlag(cmd)
 
-		s, err := openStore()
+		sources, err := resolveSources()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error opening store: %v\n", err)
+			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
-		defer s.Close()
+		defer closeSources(sources)
 
-		var hasTable int
-		if err := s.DB.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='embedding_blobs'`).Scan(&hasTable); err != nil || hasTable == 0 {
+		hasVectors := false
+		for _, src := range sources {
+			if src.hasVectors() {
+				hasVectors = true
+				break
+			}
+		}
+		if !hasVectors {
 			fmt.Fprintln(os.Stderr, "Vector index not found. Run 'qmd embed' first.")
 			os.Exit(1)
 		}
 
-		cfg, _ := config.LoadConfig()
-		client, err := llm.NewEmbedClient(config.EmbedModel(cfg))
+		hits, err := runVectors(sources, query, limit*2, minScore)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error creating embed client: %v\n", err)
+			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
-
-		formatted := formatQueryForEmbedding(query)
-		result, err := client.Embed(formatted)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error embedding query: %v\n", err)
-			os.Exit(1)
-		}
-
-		results, err := s.SearchVectorsBrute(result.Embedding, limit)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error searching: %v\n", err)
-			os.Exit(1)
-		}
-
-		var rows []SearchOutputRow
-		for _, r := range results {
-			if r.Score < minScore {
-				continue
-			}
-			ctx := ""
-			if cfg != nil {
-				col, path := parseVirtualPath(r.Filepath)
-				if col != "" {
-					ctx = config.FindContextForPath(cfg, col, path)
+		if collection != "" {
+			kept := hits[:0]
+			for _, h := range hits {
+				if h.Collection == collection {
+					kept = append(kept, h)
 				}
 			}
-			body := r.Body
-			if !full && len(body) > 500 {
-				body = body[:500] + "..."
-			}
-			rows = append(rows, SearchOutputRow{
-				Docid: docid(r.Hash), Filepath: r.Filepath, Title: r.Title, Body: body, Score: r.Score, Context: ctx, Full: full,
-			})
+			hits = kept
 		}
-		if len(rows) == 0 {
+		if len(hits) > limit {
+			hits = hits[:limit]
+		}
+		if len(hits) == 0 {
 			fmt.Println("No results found.")
 			return
+		}
+		rows := make([]SearchOutputRow, 0, len(hits))
+		for _, h := range hits {
+			rows = append(rows, rowFromHit(h, full, len(sources) > 1))
 		}
 		WriteSearchOutput(rows, format, full, lineNumbers)
 	},
@@ -92,7 +77,7 @@ var vsearchCmd = &cobra.Command{
 
 func init() {
 	vsearchCmd.Flags().IntP("n", "n", 5, "Number of results")
-	vsearchCmd.Flags().StringP("collection", "c", "", "Restrict to collection (not yet implemented)")
+	vsearchCmd.Flags().StringP("collection", "c", "", "Restrict to collection")
 	vsearchCmd.Flags().Float64("min-score", 0.3, "Minimum score threshold")
 	vsearchCmd.Flags().Bool("full", false, "Show full document content")
 	vsearchCmd.Flags().Bool("line-numbers", false, "Add line numbers")

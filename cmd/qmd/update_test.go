@@ -1,6 +1,8 @@
 package main
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -126,7 +128,21 @@ func TestResolveServerConfigPath(t *testing.T) {
 	}
 }
 
+// fakeEmbedBackend answers /embeddings so tests can exercise the paths that
+// refuse to run without a working backend.
+func fakeEmbedBackend(t *testing.T) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"embedding":[1,0]}]}`))
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv("OLLAMA_HOST", srv.URL)
+	t.Setenv("QMD_EMBED_BACKEND", "api")
+}
+
 func TestEmbedRefusesConfiguredModelChange(t *testing.T) {
+	fakeEmbedBackend(t)
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "index.sqlite")
 	yml := "db_path: " + dbPath + "\ncollections: {}\n"
@@ -171,6 +187,7 @@ func TestEmbedRefusesConfiguredModelChange(t *testing.T) {
 }
 
 func TestEmbedRecordsModelInIndexFile(t *testing.T) {
+	fakeEmbedBackend(t)
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "index.sqlite")
 	yml := "db_path: " + dbPath + "\ncollections: {}\n"
