@@ -65,4 +65,13 @@ func TestReservedIndexNames(t *testing.T) {
 			t.Errorf("%s was loaded as an index", name)
 		}
 	}
+
+	// An index legitimately named "server" is a collections file, not a server
+	// config, and must still work.
+	if err := os.WriteFile(filepath.Join(dir, "server.yml"), []byte("collections: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadIndexConfig("server"); err != nil {
+		t.Errorf("an index named server was refused: %v", err)
+	}
 }

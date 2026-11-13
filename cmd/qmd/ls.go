@@ -1,7 +1,9 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"sort"
 	"strings"
@@ -35,8 +37,12 @@ func printIndexes(names []string) bool {
 			fmt.Println("    no collections")
 			continue
 		}
-		if _, err := os.Stat(dbPath); err != nil {
+		if _, err := os.Stat(dbPath); errors.Is(err, fs.ErrNotExist) {
 			fmt.Println("    (not built; run qmd update)")
+			continue
+		} else if err != nil {
+			fmt.Printf("    cannot read database: %v\n", err)
+			ok = false
 			continue
 		}
 		s, err := store.NewStore(dbPath)
@@ -83,9 +89,12 @@ var lsCmd = &cobra.Command{
 			os.Exit(1)
 		}
 		if dbPath, err := config.DBPathFor(getIndexName()); err == nil {
-			if _, err := os.Stat(dbPath); err != nil {
+			if _, err := os.Stat(dbPath); errors.Is(err, fs.ErrNotExist) {
 				fmt.Printf("Index %q (%s): not built; run qmd update\n", getIndexName(), dbPath)
 				return
+			} else if err != nil {
+				fmt.Fprintf(os.Stderr, "Index %q (%s): %v\n", getIndexName(), dbPath, err)
+				os.Exit(1)
 			}
 		}
 		s, err := openStore()

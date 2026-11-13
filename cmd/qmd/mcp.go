@@ -303,18 +303,9 @@ func vsearchTool(sources []indexSource) func(context.Context, *mcp.CallToolReque
 			return toolError("Vector index not found. Run 'qmd embed' first to create embeddings.")
 		}
 		limit := resultLimit(args.Limit, 10)
-		hits, err := runVectors(sources, args.Query, limit*2, args.MinScore)
+		hits, err := runVectors(sources, args.Query, limit, args.MinScore, args.Collection)
 		if err != nil {
 			return toolError("Vector search failed: " + err.Error())
-		}
-		if args.Collection != "" {
-			kept := hits[:0]
-			for _, h := range hits {
-				if h.Collection == args.Collection {
-					kept = append(kept, h)
-				}
-			}
-			hits = kept
 		}
 		return hitsResult(truncateHits(hits, limit), args.Query, fused(sources))
 	}
@@ -360,7 +351,8 @@ func getTool(sources []indexSource) func(context.Context, *mcp.CallToolRequest, 
 				input = input[:idx]
 			}
 		}
-		src, collection, path, ok := findDoc(sources, input)
+		narrowed, input := indexPrefix(sources, input)
+		src, collection, path, ok := findDoc(narrowed, input)
 		if !ok {
 			return toolError("Document not found: " + args.File)
 		}
@@ -398,11 +390,16 @@ func multiGetTool(sources []indexSource) func(context.Context, *mcp.CallToolRequ
 			maxBytes = mcpDefaultMultiGetMax
 		}
 		var docs []docForMultiGet
-		for _, src := range sources {
-			if strings.Contains(args.Pattern, ",") && !strings.Contains(args.Pattern, "*") && !strings.Contains(args.Pattern, "?") {
-				docs = append(docs, multiGetByList(src.Store, strings.Split(args.Pattern, ","), args.MaxLines, maxBytes)...)
-			} else {
-				docs = append(docs, multiGetByGlob(src.Store, args.Pattern, args.MaxLines, maxBytes)...)
+		if strings.Contains(args.Pattern, ",") && !strings.Contains(args.Pattern, "*") && !strings.Contains(args.Pattern, "?") {
+			docs = multiGetByList(sources, strings.Split(args.Pattern, ","), args.MaxLines, maxBytes)
+		} else {
+			for _, src := range sources {
+				docs = append(docs, multiGetByGlob(src, args.Pattern, args.MaxLines, maxBytes)...)
+			}
+		}
+		if !fused(sources) {
+			for i := range docs {
+				docs[i].Index = ""
 			}
 		}
 		if len(docs) == 0 {
@@ -412,7 +409,7 @@ func multiGetTool(sources []indexSource) func(context.Context, *mcp.CallToolRequ
 		for _, d := range docs {
 			text := d.Body
 			if d.Skipped {
-				text = "[SKIPPED: " + d.DisplayPath + " - " + d.SkipReason + ". Use get with file=\"" + d.DisplayPath + "\" to retrieve.]"
+				text = "[SKIPPED: " + d.label() + " - " + d.SkipReason + ". Use get with file=\"" + d.label() + "\" to retrieve.]"
 			} else {
 				if args.LineNumbers {
 					text = addLineNumbers(text, 1)
@@ -421,7 +418,7 @@ func multiGetTool(sources []indexSource) func(context.Context, *mcp.CallToolRequ
 					text = "<!-- Context: " + d.Context + " -->\n\n" + text
 				}
 			}
-			content = append(content, &mcp.TextContent{Text: "--- " + d.DisplayPath + " ---\n" + text})
+			content = append(content, &mcp.TextContent{Text: "--- " + d.label() + " ---\n" + text})
 		}
 		return &mcp.CallToolResult{Content: content}, nil, nil
 	}

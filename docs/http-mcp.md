@@ -37,10 +37,10 @@ anywhere, and only the default name is special.
   no `<name>.yml` cannot report "no collections" while an empty database is
   created behind it. `qmd ls` with no `--index` and no `index.yml` lists every
   index in the directory with its database and collections, because listing is
-  its job. The commands that can only act on one index (`search`, `get`,
-  `vsearch`, `query`, `status`, `cleanup`, `mcp`) exit nonzero with a one-line
-  hint naming the indexes to choose from. Writers (`collection add`, `context`)
-  still create the file.
+  its job. `search`, `vsearch`, `query`, `get` and `multi-get` read every index
+  when no `--index` is given, and merge by rank. `status` and `cleanup` act on
+  one index, so they exit nonzero with a one-line hint naming the choices.
+  Writers (`collection add`, `context`) still create the file.
 - A **collection** is a directory tree inside one index.
 - A **mount** is a URL path served by the HTTP server, pointing at one index.
   Several mounts may point at the same index, for example `/mcp` as an alias of

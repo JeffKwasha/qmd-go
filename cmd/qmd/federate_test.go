@@ -275,7 +275,7 @@ func TestVSearchRefusesStaleModel(t *testing.T) {
 	}
 	defer closeSources(sources)
 
-	_, err = runVectors(sources, "query", 5, 0)
+	_, err = runVectors(sources, "query", 5, 0, "")
 	if err == nil {
 		t.Fatal("a stale model produced results instead of an error")
 	}

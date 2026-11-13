@@ -105,11 +105,21 @@ func EnsureConfigDir() error {
 }
 
 // IsReservedIndexName reports whether name is the server config file, or the
-// pre-rename name of it. Neither can be an index: reading one as an index would
-// create an empty database behind mounts and keys.
+// pre-rename name of it while that file still holds mounts and keys. An index
+// legitimately named "server" has a `collections` key, and stays an index.
 func IsReservedIndexName(name string) bool {
 	name = strings.TrimSuffix(name, ".yml")
-	return name == strings.TrimSuffix(ServerConfigName, ".yml") || name == strings.TrimSuffix(legacyServerConfigName, ".yml")
+	if name == strings.TrimSuffix(ServerConfigName, ".yml") {
+		return true
+	}
+	if name != strings.TrimSuffix(legacyServerConfigName, ".yml") {
+		return false
+	}
+	dir, err := GetConfigDir()
+	if err != nil {
+		return true
+	}
+	return holdsServerConfig(filepath.Join(dir, legacyServerConfigName))
 }
 
 func LoadConfig() (*Config, error) {
@@ -266,7 +276,7 @@ func SaveConfig(cfg *Config) error {
 		return err
 	}
 
-	return os.WriteFile(path, data, 0644)
+	return WriteFileAtomic(path, data, 0o644)
 }
 
 // SetGlobalContext sets or clears the global context (applies to all collections).

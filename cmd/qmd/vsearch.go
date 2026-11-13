@@ -46,19 +46,10 @@ var vsearchCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
-		hits, err := runVectors(sources, query, limit*2, minScore)
+		hits, err := runVectors(sources, query, limit, minScore, collection)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
-		}
-		if collection != "" {
-			kept := hits[:0]
-			for _, h := range hits {
-				if h.Collection == collection {
-					kept = append(kept, h)
-				}
-			}
-			hits = kept
 		}
 		if len(hits) > limit {
 			hits = hits[:limit]

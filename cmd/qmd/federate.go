@@ -12,6 +12,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 
@@ -29,12 +30,13 @@ const rrfK = 60
 type modelMismatch struct {
 	Index      string
 	Stored     string
+	Source     string
 	Configured string
 }
 
 func (e *modelMismatch) Error() string {
-	return fmt.Sprintf("index %q holds embeddings from model %q while the configured model is %q; run qmd embed --force to rebuild",
-		e.Index, e.Stored, e.Configured)
+	return fmt.Sprintf("index %q holds embeddings from model %q while %s gives %q; run qmd embed --force to rebuild",
+		e.Index, e.Stored, e.Source, e.Configured)
 }
 
 // checkModel refuses a read from an index whose vectors do not match its
@@ -48,7 +50,7 @@ func checkModel(src indexSource) error {
 	}
 	for _, m := range stored {
 		if m != model {
-			return &modelMismatch{Index: src.Name, Stored: m, Configured: model}
+			return &modelMismatch{Index: src.Name, Stored: m, Source: config.EmbedModelSource(src.Cfg), Configured: model}
 		}
 	}
 	return nil
@@ -116,6 +118,14 @@ func openSources(names []string) ([]indexSource, error) {
 		if err != nil {
 			closeSources(out)
 			return nil, err
+		}
+		if _, err := os.Stat(dbPath); err != nil {
+			if len(names) == 1 {
+				closeSources(out)
+				return nil, fmt.Errorf("index %q (%s): not built; run qmd update", name, dbPath)
+			}
+			fmt.Fprintf(os.Stderr, "qmd: index %q is not built; run qmd update\n", name)
+			continue
 		}
 		s, err := store.NewStore(dbPath)
 		if err != nil {
@@ -251,8 +261,11 @@ func runFTS(sources []indexSource, query string, limit int, collection string, m
 		}
 		lists = append(lists, list)
 	}
-	if len(lists) == 0 && firstErr != nil {
-		return nil, firstErr
+	if firstErr != nil {
+		if len(lists) == 0 {
+			return nil, firstErr
+		}
+		fmt.Fprintf(os.Stderr, "qmd: %v\n", firstErr)
 	}
 	return fuseLists(lists), nil
 }
@@ -260,7 +273,7 @@ func runFTS(sources []indexSource, query string, limit int, collection string, m
 // runVectors embeds the query once per index, with that index's own model, and
 // fuses the lists. Two indexes may well use different models; the ranks still
 // compare, the scores would not.
-func runVectors(sources []indexSource, query string, limit int, minScore float64) ([]fusedHit, error) {
+func runVectors(sources []indexSource, query string, limit int, minScore float64, collection string) ([]fusedHit, error) {
 	var lists [][]fusedHit
 	var firstErr error
 	for _, src := range sources {
@@ -300,13 +313,19 @@ func runVectors(sources []indexSource, query string, limit int, minScore float64
 			if r.Score < minScore || seen[r.Filepath] {
 				continue
 			}
+			if collection != "" && !strings.HasPrefix(r.DisplayPath, collection+"/") {
+				continue
+			}
 			seen[r.Filepath] = true
 			list = append(list, vecHit(src, r))
 		}
 		lists = append(lists, list)
 	}
-	if len(lists) == 0 && firstErr != nil {
-		return nil, firstErr
+	if firstErr != nil {
+		if len(lists) == 0 {
+			return nil, firstErr
+		}
+		fmt.Fprintf(os.Stderr, "qmd: %v\n", firstErr)
 	}
 	return fuseLists(lists), nil
 }
@@ -316,6 +335,7 @@ func runVectors(sources []indexSource, query string, limit int, minScore float64
 // index useful in a federated answer.
 func runHybrid(sources []indexSource, query string, limit int, collection string, minScore float64) ([]fusedHit, error) {
 	var lists [][]fusedHit
+	var errs []error
 	for _, src := range sources {
 		if src.hasVectors() {
 			if err := checkModel(src); err != nil {
@@ -324,13 +344,25 @@ func runHybrid(sources []indexSource, query string, limit int, collection string
 		}
 		one := []indexSource{src}
 		fts, ftsErr := runFTS(one, query, limit, collection, minScore)
-		vec, vecErr := runVectors(one, query, limit, minScore)
-		if ftsErr != nil && vecErr != nil {
-			return nil, fmt.Errorf("index %q: %w", src.Name, ftsErr)
+		vec, vecErr := runVectors(one, query, limit, minScore, collection)
+		combined := fuseLists([][]fusedHit{fts, vec})
+		if len(combined) == 0 {
+			if ftsErr != nil {
+				errs = append(errs, ftsErr)
+			} else if vecErr != nil {
+				errs = append(errs, vecErr)
+			}
 		}
-		lists = append(lists, fuseLists([][]fusedHit{fts, vec}))
+		lists = append(lists, combined)
 	}
-	return fuseLists(lists), nil
+	out := fuseLists(lists)
+	if len(out) == 0 && len(errs) > 0 {
+		return nil, errs[0]
+	}
+	for _, err := range errs {
+		fmt.Fprintf(os.Stderr, "qmd: %v\n", err)
+	}
+	return out, nil
 }
 
 // rowFromHit is the shape every output format consumes. label adds the index

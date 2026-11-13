@@ -12,11 +12,11 @@ import (
 	"bytes"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/ba0f3/qmd-go/internal/config"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )
@@ -135,43 +135,12 @@ func encodeYAML(doc *yaml.Node) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// writeFileAtomic replaces a file through a temporary sibling, so a reader
-// (the running server re-reads on every request) never sees a half-written
-// config and a failed write never truncates the old one.
-func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
-	if info, err := os.Stat(path); err == nil {
-		mode = info.Mode().Perm()
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	defer func() { _ = os.Remove(tmpName) }()
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Chmod(mode); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmpName, path)
-}
-
 func writeYAML(path string, doc *yaml.Node) error {
-	info, err := os.Stat(path)
-	if err != nil {
-		return err
-	}
 	data, err := encodeYAML(doc)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, info.Mode().Perm())
+	return config.WriteFileAtomic(path, data, 0o600)
 }
 
 func readYAMLDoc(path string) (*yaml.Node, error) {

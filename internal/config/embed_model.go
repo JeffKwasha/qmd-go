@@ -100,24 +100,25 @@ func SetEmbedModel(indexName, model string) (bool, error) {
 	return true, writeNode(path, &doc)
 }
 
-// writeNode replaces the file through a temporary sibling: the running server
-// re-reads index configs, and must never see a truncated one.
-func writeNode(path string, doc *yaml.Node) error {
-	out, err := yaml.Marshal(doc)
-	if err != nil {
-		return err
+// WriteFileAtomic replaces a file through a temporary sibling: a reader (the
+// running server re-reads configs) never sees a half-written file, and a failed
+// write never truncates the old one. A symlinked config is written through the
+// link, not replaced by a regular file.
+func WriteFileAtomic(path string, data []byte, mode os.FileMode) error {
+	target := path
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		target = resolved
 	}
-	mode := os.FileMode(0o644)
-	if info, err := os.Stat(path); err == nil {
+	if info, err := os.Stat(target); err == nil {
 		mode = info.Mode().Perm()
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp")
+	tmp, err := os.CreateTemp(filepath.Dir(target), "."+filepath.Base(target)+".tmp")
 	if err != nil {
 		return err
 	}
 	tmpName := tmp.Name()
 	defer func() { _ = os.Remove(tmpName) }()
-	if _, err := tmp.Write(out); err != nil {
+	if _, err := tmp.Write(data); err != nil {
 		_ = tmp.Close()
 		return err
 	}
@@ -128,5 +129,14 @@ func writeNode(path string, doc *yaml.Node) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmpName, path)
+	return os.Rename(tmpName, target)
+}
+
+// writeNode routes an index config rewrite through WriteFileAtomic.
+func writeNode(path string, doc *yaml.Node) error {
+	out, err := yaml.Marshal(doc)
+	if err != nil {
+		return err
+	}
+	return WriteFileAtomic(path, out, 0o644)
 }

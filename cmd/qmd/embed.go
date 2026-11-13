@@ -85,33 +85,6 @@ func embedIndex(name string, force bool, modelOverride string) error {
 		return err
 	}
 
-	client, err := llm.NewEmbedClient(model)
-	if err != nil {
-		return err
-	}
-
-	if force {
-		// A forced run destroys what is there. Ask the backend for one vector
-		// first, so a typo'd model or a dead service leaves the index intact.
-		if _, err := client.Embed("qmd embed probe"); err != nil {
-			return fmt.Errorf("backend did not answer, so the existing vectors were kept: %w", err)
-		}
-		fmt.Printf("Index %q: clearing all vectors\n", name)
-		if err := s.ClearAllEmbeddings(); err != nil {
-			return err
-		}
-	} else {
-		models, err := s.EmbeddingModels()
-		if err != nil {
-			return err
-		}
-		for _, stored := range models {
-			if stored != model {
-				return fmt.Errorf("holds embeddings from model %q while %s gives %q; run qmd embed --force to rebuild", stored, source, model)
-			}
-		}
-	}
-
 	// The model is recorded once the run has something to show for it, so a
 	// failed run cannot pin the index to a model that never produced a vector.
 	recordModel := func() error {
@@ -132,11 +105,48 @@ func embedIndex(name string, force bool, modelOverride string) error {
 	if err != nil {
 		return err
 	}
+	stored, err := s.EmbeddingModels()
+	if err != nil {
+		return err
+	}
+
+	if force {
+		// A forced run destroys what is there, so ask the backend for one vector
+		// before clearing: a typo'd model or a dead service leaves the index
+		// intact. With nothing indexed and no vectors, there is nothing to
+		// protect or clear.
+		if len(hashes) == 0 && len(stored) == 0 {
+			fmt.Printf("Index %q: nothing to embed\n", name)
+			return recordModel()
+		}
+		client, err := llm.NewEmbedClient(model)
+		if err != nil {
+			return err
+		}
+		if _, err := client.Embed("qmd embed probe"); err != nil {
+			return fmt.Errorf("backend did not answer, so the existing vectors were kept: %w", err)
+		}
+		fmt.Printf("Index %q: clearing all vectors\n", name)
+		if err := s.ClearAllEmbeddings(); err != nil {
+			return err
+		}
+	} else {
+		for _, m := range stored {
+			if m != model {
+				return fmt.Errorf("holds embeddings from model %q while %s gives %q; run qmd embed --force to rebuild", m, source, model)
+			}
+		}
+	}
+
 	if len(hashes) == 0 {
 		fmt.Printf("Index %q: nothing to embed\n", name)
 		return recordModel()
 	}
 
+	client, err := llm.NewEmbedClient(model)
+	if err != nil {
+		return err
+	}
 	backend := os.Getenv("QMD_EMBED_BACKEND")
 	if backend == "" {
 		if llm.GGUFEnabled() {
