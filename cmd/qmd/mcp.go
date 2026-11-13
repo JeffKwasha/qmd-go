@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"net/url"
-	"os"
 	"strconv"
 	"strings"
 
@@ -260,11 +259,7 @@ func vsearchTool(s *store.Store, cfg *config.Config) func(context.Context, *mcp.
 				IsError: true,
 			}, nil, nil
 		}
-		model := os.Getenv("QMD_EMBED_MODEL")
-		if model == "" {
-			model = llm.DefaultEmbedModel()
-		}
-		client, err := llm.NewEmbedClient(model)
+		client, err := llm.NewEmbedClient(config.EmbedModel(cfg))
 		if err != nil {
 			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "Embed client: " + err.Error()}}, IsError: true}, nil, nil
 		}
@@ -330,11 +325,7 @@ func queryTool(s *store.Store, cfg *config.Config) func(context.Context, *mcp.Ca
 		var hasVec int
 		_ = s.DB.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='embedding_blobs'`).Scan(&hasVec)
 		if hasVec > 0 {
-			model := os.Getenv("QMD_EMBED_MODEL")
-			if model == "" {
-				model = llm.DefaultEmbedModel()
-			}
-			client, err := llm.NewEmbedClient(model)
+			client, err := llm.NewEmbedClient(config.EmbedModel(cfg))
 			if err == nil {
 				formatted := formatQueryForEmbedding(args.Query)
 				emb, err := client.Embed(formatted)

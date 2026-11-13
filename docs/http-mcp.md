@@ -19,7 +19,7 @@ Two files matter, and they are separate on purpose:
 
 | File | Holds | Read by |
 |---|---|---|
-| `~/.config/qmd/<index>.yml` | Collections: name, path, glob, context | CLI and server |
+| `~/.config/qmd/<index>.yml` | One index: `db_path`, `embed_model`, collections | CLI and server |
 | `~/.config/qmd/CONFIG.yml` | Mounts (URL path to index), groups, keys | Server only |
 
 The server file is upper case so a listing puts it above the indexes: `C` sorts
@@ -61,20 +61,50 @@ either run; a missing `<name>.yml` is an error, not a silent no-op. Both skip
 `CONFIG.yml`.
 
 Embeddings are per model, and the vector's dimension is part of the data: an
-index holding vectors from model A cannot be queried with model B. `qmd embed`
-records the model in `content_vectors` and refuses to run when the configured
-`QMD_EMBED_MODEL` differs from what is stored:
+index holding vectors from model A cannot be queried with model B. The model an
+index needs lives in its own file, because the index is a file and the model is
+a property of that file:
 
-    index "personal": holds embeddings from model "jina-v5-small-text-matching" while the configured model is "nomic-embed-text"; run qmd embed --force to rebuild
+```yaml
+# private.yml
+db_path: /mnt/srv/qmd/private.sqlite
+embed_model: embeddinggemma:300m    # what this index's vectors were made with
+collections: ...
+```
+
+`embed_model` is resolved in this order:
+
+1. `--model <spec>` on `qmd embed`, which also records it in the file.
+2. `embed_model` in `<name>.yml`.
+3. `$QMD_EMBED_MODEL`.
+4. The build's default model.
+
+So the environment variable is the value a new index starts from, not the value
+an existing index is stuck with. The first `qmd embed` that runs with no
+`embed_model` in the file writes the model it used, so the file describes
+itself from then on and re-embedding a month later does not depend on what the
+unit's environment said at the time. `--model` is the way to change it:
+
+    qmd --index private embed --force --model embeddinggemma:300m
+
+`qmd embed` compares `embed_model` with what `content_vectors` records and
+refuses to run when they disagree:
+
+    index "private": holds embeddings from model "jina-v5-small-text-matching" while the configured model is "embeddinggemma:300m"; run qmd embed --force to rebuild
 
 `--force` clears the targeted indexes' vectors and re-embeds their documents;
 with no `--index` that is every index, so narrow it when only one model changed.
-Nothing rebuilds automatically, so a model change is a deliberate rebuild.
+Nothing rebuilds automatically, so a model change is a deliberate rebuild. The
+query side reads the same field per index, so `vsearch` and `query` embed the
+query with the model the mounted index records. The CLI reads the file per run;
+the HTTP server loads it at startup, so a changed `embed_model` reaches it on
+the next restart.
 
 A reindex unit needs the config directory and two lines:
 
 ```ini
 Environment=QMD_CONFIG_DIR=/mnt/srv/qmd
+Environment=QMD_EMBED_MODEL=embeddinggemma:300m   # seed for a new index only
 ExecStart=/mnt/pool/tools/bin/qmd update
 ExecStart=/mnt/pool/tools/bin/qmd embed
 ```

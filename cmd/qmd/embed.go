@@ -38,7 +38,7 @@ func extractTitle(body string) string {
 var embedCmd = &cobra.Command{
 	Use:           "embed",
 	Short:         "Generate vector embeddings, in every index unless --index names one",
-	Long:          "Generate vector embeddings for indexed documents. One index holds one model's vectors; a different configured model is refused until --force rebuilds them.",
+	Long:          "Generate vector embeddings for indexed documents. The model comes from --model, then embed_model in <index>.yml, then $QMD_EMBED_MODEL; a model other than the one the stored vectors came from is refused until --force rebuilds them.",
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -47,9 +47,10 @@ var embedCmd = &cobra.Command{
 			return err
 		}
 		force, _ := cmd.Flags().GetBool("force")
+		model, _ := cmd.Flags().GetString("model")
 		var errs []error
 		for _, name := range names {
-			if err := embedIndex(name, force); err != nil {
+			if err := embedIndex(name, force, model); err != nil {
 				errs = append(errs, fmt.Errorf("index %q: %w", name, err))
 			}
 		}
@@ -57,10 +58,16 @@ var embedCmd = &cobra.Command{
 	},
 }
 
-func embedIndex(name string, force bool) error {
-	model := os.Getenv("QMD_EMBED_MODEL")
+func embedIndex(name string, force bool, modelOverride string) error {
+	cfg, err := config.LoadConfigFor(name)
+	if err != nil {
+		return err
+	}
+	model := strings.TrimSpace(modelOverride)
+	source := "--model"
 	if model == "" {
-		model = llm.DefaultEmbedModel()
+		model = config.EmbedModel(cfg)
+		source = config.EmbedModelSource(cfg)
 	}
 
 	config.CurrentIndexName = name
@@ -89,8 +96,20 @@ func embedIndex(name string, force bool) error {
 		}
 		for _, stored := range models {
 			if stored != model {
-				return fmt.Errorf("holds embeddings from model %q while the configured model is %q; run qmd embed --force to rebuild", stored, model)
+				return fmt.Errorf("holds embeddings from model %q while %s gives %q; run qmd embed --force to rebuild", stored, source, model)
 			}
+		}
+	}
+
+	// Record the model in the index file, so a later run does not depend on
+	// this shell's environment and a copied database carries its own answer.
+	if strings.TrimSpace(cfg.EmbedModel) != model {
+		changed, err := config.SetEmbedModel(name, model)
+		if err != nil {
+			return err
+		}
+		if changed {
+			fmt.Printf("Index %q: recording embed_model: %s\n", name, model)
 		}
 	}
 
@@ -162,5 +181,6 @@ func embedIndex(name string, force bool) error {
 
 func init() {
 	embedCmd.Flags().BoolP("force", "f", false, "Clear this index's vectors and rebuild them with the configured model")
+	embedCmd.Flags().String("model", "", "Embedding model for this run; recorded in <index>.yml and overrides embed_model and $QMD_EMBED_MODEL")
 	rootCmd.AddCommand(embedCmd)
 }

@@ -37,7 +37,7 @@ qmd get <file>                    # Get document by path or docid (#abc123)
 qmd multi-get <pattern>           # Get multiple docs by glob or comma-separated list
 qmd status                        # Show index status and collections
 qmd update [--pull] [--full]     # Re-index every index; --index <name> for one (--pull: git pull first)
-qmd embed [-f]                    # Embed every index; -f rebuilds after a model change
+qmd embed [-f] [--model <spec>]   # Embed every index; -f rebuilds, --model records a new one
 qmd search <query>                # BM25 full-text search
 qmd vsearch <query>               # Vector similarity search
 qmd query <query>                 # Hybrid search (BM25 + vector, RRF)

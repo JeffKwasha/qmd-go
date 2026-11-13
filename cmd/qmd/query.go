@@ -106,11 +106,8 @@ var queryCmd = &cobra.Command{
 		var hasVec int
 		_ = s.DB.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='embedding_blobs'`).Scan(&hasVec)
 		if hasVec > 0 {
-			model := os.Getenv("QMD_EMBED_MODEL")
-			if model == "" {
-				model = llm.DefaultEmbedModel()
-			}
-			client, err := llm.NewEmbedClient(model)
+			indexCfg, _ := config.LoadConfig()
+			client, err := llm.NewEmbedClient(config.EmbedModel(indexCfg))
 			if err == nil {
 				formatted := formatQueryForEmbedding(query)
 				result, err := client.Embed(formatted)

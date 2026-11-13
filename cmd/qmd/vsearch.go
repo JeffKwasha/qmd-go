@@ -41,11 +41,8 @@ var vsearchCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
-		model := os.Getenv("QMD_EMBED_MODEL")
-		if model == "" {
-			model = llm.DefaultEmbedModel()
-		}
-		client, err := llm.NewEmbedClient(model)
+		cfg, _ := config.LoadConfig()
+		client, err := llm.NewEmbedClient(config.EmbedModel(cfg))
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error creating embed client: %v\n", err)
 			os.Exit(1)
@@ -64,7 +61,6 @@ var vsearchCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
-		cfg, _ := config.LoadConfig()
 		var rows []SearchOutputRow
 		for _, r := range results {
 			if r.Score < minScore {

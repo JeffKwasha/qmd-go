@@ -148,7 +148,7 @@ func TestEmbedRefusesConfiguredModelChange(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err = embedIndex("index", false)
+	err = embedIndex("index", false, "")
 	if err == nil {
 		t.Fatal("model change accepted")
 	}
@@ -158,7 +158,7 @@ func TestEmbedRefusesConfiguredModelChange(t *testing.T) {
 		}
 	}
 
-	if err := embedIndex("index", true); err != nil {
+	if err := embedIndex("index", true, ""); err != nil {
 		t.Fatalf("force rebuild: %v", err)
 	}
 	models, err := s.EmbeddingModels()
@@ -168,4 +168,52 @@ func TestEmbedRefusesConfiguredModelChange(t *testing.T) {
 	if len(models) != 0 {
 		t.Errorf("vectors survived --force: %v", models)
 	}
+}
+
+func TestEmbedRecordsModelInIndexFile(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "index.sqlite")
+	yml := "db_path: " + dbPath + "\ncollections: {}\n"
+	if err := os.WriteFile(filepath.Join(dir, "index.yml"), []byte(yml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("QMD_CONFIG_DIR", dir)
+	t.Setenv("QMD_EMBED_MODEL", "env-model")
+
+	// Nothing to embed, but the run still records what it would have used.
+	if err := embedIndex("index", false, ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := loadEmbedModel(t, dir); got != "env-model" {
+		t.Errorf("embed_model = %q, want env-model", got)
+	}
+
+	// The file now wins over the environment.
+	t.Setenv("QMD_EMBED_MODEL", "some-other-model")
+	if err := embedIndex("index", false, ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := loadEmbedModel(t, dir); got != "env-model" {
+		t.Errorf("a later run changed the recorded model to %q", got)
+	}
+
+	// --model overrides the file and records itself.
+	if err := embedIndex("index", false, "flag-model"); err != nil {
+		t.Fatal(err)
+	}
+	if got := loadEmbedModel(t, dir); got != "flag-model" {
+		t.Errorf("embed_model = %q, want flag-model", got)
+	}
+}
+
+func loadEmbedModel(t *testing.T, dir string) string {
+	t.Helper()
+	cfg, err := config.LoadConfigFor("index")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DBPath != filepath.Join(dir, "index.sqlite") {
+		t.Errorf("db_path changed to %q", cfg.DBPath)
+	}
+	return cfg.EmbedModel
 }
