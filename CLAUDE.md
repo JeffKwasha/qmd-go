@@ -153,4 +153,8 @@ go test ./...
 - Never run `qmd collection add`, `qmd embed`, or `qmd update` automatically
 - Never modify the SQLite database directly
 - Write out example commands for the user to run manually
-- Index is stored at `~/.cache/qmd/index.sqlite`
+- Each index is `<index>.yml` plus a SQLite file: `db_path` from the yml, else
+  `QMD_DB_DIR/<name>.sqlite`, `INDEX_PATH`, or `~/.cache/qmd/<name>.sqlite`
+- The yml also records `embed_model`; `QMD_EMBED_MODEL` only seeds a new index
+- Reads merge every index when no `--index` is given; `get`/`multi-get` resolve
+  the index from the path

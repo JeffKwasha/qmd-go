@@ -113,15 +113,21 @@ Issue keys with the CLI rather than by hand. Only the hash is written:
 qmd server key add personal --label laptop --allow /mcp/personal
 qmd server key list
 qmd server key remove sha256:ab12cd34
-qmd server check            # dead mounts, dead allow rules, expiring or expired keys
+qmd server check            # dead or unreachable mounts, dead allow rules,
+                            # expiring or expired keys; nonzero on problems
 ```
 
-Public paths need no key; a key reaches only the paths its group allows.
-The same hash in two records is a startup error, not a rule about which group
-wins. Unknown paths return 404, denied requests 401 (`WWW-Authenticate: Bearer`),
-and keys are logged only as `sha256:<8>`. `GET /healthz` reports
-liveness. Keys and `public:` entries reload without a restart; adding a mount still
-needs one. Older configs that stored keys under `auth.groups.*` must move them to
+A request searches every index behind the mounts the caller may reach: the
+`public:` paths, plus the paths the key's group allows. A mount may name `all`
+instead of an index, which is a catchall: it answers from whatever that caller is
+granted, while a mount naming an index answers from that index only.
+
+Public paths need no key. The same hash in two records is a startup error, not a
+rule about which group wins. An unknown path returns 404; a missing, unknown or
+expired key returns 401 (`WWW-Authenticate: Bearer`, with `key expired` when that
+is why); a credential accepted for the mount that reaches no index returns 403.
+Keys are logged only as `sha256:<8>`, `GET /healthz` reports liveness, and keys
+and `public:` entries reload without a restart; adding a mount still needs one. Older configs that stored keys under `auth.groups.*` must move them to
 `auth.keys` by hand; see [docs/http-mcp.md](docs/http-mcp.md).
 Point any streamable-HTTP MCP client at
 `http://127.0.0.1:8422/mcp`; add `Authorization: Bearer <token>` for private indexes.
@@ -168,7 +174,7 @@ Or configure MCP manually in `~/.claude/settings.json`:
 - **Embeddings** – Stored in SQLite; generated via Ollama, any OpenAI-compatible API, or local GGUF (purego, no CGO)
 - **Hybrid search** – `query` combines BM25 and vector results using Reciprocal Rank Fusion (RRF)
 - **Chunking** – 800 tokens per chunk, 15% overlap (character-based in Go)
-- **Index** – `db_path` in `~/.config/qmd/<index>.yml`, else `QMD_DB_DIR/<index>.sqlite`, else `INDEX_PATH`, else `~/.cache/qmd/index.sqlite`
+- **Index** – `db_path` in `<index>.yml`, else `QMD_DB_DIR/<name>.sqlite`, else `INDEX_PATH`, else `~/.cache/qmd/<name>.sqlite`. A relative `db_path` is refused; it would be one database per working directory
 
 ```
 Query ──┬──► BM25 (FTS5) ──► Ranked list
@@ -304,7 +310,11 @@ qmd embed
 qmd embed -f
 ```
 
-Set `QMD_EMBED_MODEL` (default: `nomic-embed-text` for Ollama) or use an OpenAI-compatible endpoint.
+Each index records its own model as `embed_model` in `<index>.yml`. Resolution is
+`--model` on `qmd embed`, then the file, then `QMD_EMBED_MODEL`, then the build
+default, so the environment only seeds a new index. `qmd embed --force --model
+<spec>` is how a model changes; stored vectors from another model are refused, for
+reads as well as writes.
 
 ### Context Management
 
@@ -415,7 +425,9 @@ qmd cleanup
 
 ## Data Storage
 
-Index stored in: `~/.cache/qmd/index.sqlite` (or `INDEX_PATH`; use `--index <name>` for `~/.cache/qmd/<name>.sqlite`).
+`db_path` in `<index>.yml` wins; otherwise `QMD_DB_DIR/<name>.sqlite`, `INDEX_PATH`,
+or `~/.cache/qmd/<name>.sqlite`. `--index <name>` selects the index file, not a
+path. The server and the CLI use the same resolution.
 
 ### Schema (overview)
 
@@ -491,7 +503,7 @@ To build with GGUF support, qmd supports two methods. **Purego (no CGO) is recom
 | `XDG_CACHE_HOME` | `~/.cache` | Cache directory (index SQLite) |
 | `INDEX_PATH` | (derived) | Override index DB path |
 | `OLLAMA_HOST` | `http://localhost:11434/v1` | Ollama API base for embed (API backend only) |
-| `QMD_EMBED_MODEL` | API: `nomic-embed-text`; GGUF build: EmbeddingGemma 300M (HF) | Embedding model name or GGUF path/spec |
+| `QMD_EMBED_MODEL` | API: `nomic-embed-text`; GGUF build: EmbeddingGemma 300M (HF) | Seed for a new index; `embed_model` in the index file wins |
 | `QMD_EMBED_BACKEND` | GGUF build: `gguf`; API build: (none) | `gguf` = use local GGUF; `api` = use Ollama/OpenAI (e.g. when using gguf binary but want API) |
 | `QMD_MODEL_CACHE` | `~/.cache/qmd/models` | Directory for downloaded GGUF models |
 | `LLAMA_GO_LIB` | (auto-detected) | Path to `libllama_go.so` / `llama_go.dll` / `libllama_go.dylib` (purego method) |
