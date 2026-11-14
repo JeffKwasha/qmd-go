@@ -20,11 +20,12 @@ Two files matter, and they are separate on purpose:
 | File | Holds | Read by |
 |---|---|---|
 | `~/.config/qmd/<index>.yml` | One index: `db_path`, `embed_model`, collections | CLI and server |
-| `~/.config/qmd/CONFIG.yml` | Mounts (URL path to index), groups, keys | Server only |
+| `~/.config/qmd/CONFIG.yml` | Mounts (URL path to index), groups, keys | Server and `qmd server` commands |
 
-The server file is upper case so a listing puts it above the indexes: `C` sorts
-below every lower-case letter both in byte order and at the primary collation
-level. Index discovery skips it by name. A file named `server.yml` that holds
+The server file is upper case so a listing puts it above the indexes: in byte
+order `C` sits below every lower-case letter. A locale-aware sort ignores case and
+compares it as the letter `c`, so it lands among names that begin with `a` or `b`
+rather than first. Index discovery skips it by name. A file named `server.yml` that holds
 `collections:` is an index legitimately called `server`; one that holds
 `servers:` is refused, because walking it would serve mounts and keys as if they
 were collections.
@@ -179,7 +180,7 @@ Results merge by **rank**, never by score:
 Fusion is reciprocal rank fusion (`k=60`). The top result is reported as 100%
 and the rest relative to it; that number is a ranking, not a confidence. Every
 result carries its `index` name, and the CLI prefixes it (`public:qmd://...`)
-whenever more than one index answered. A single-index answer keeps its own
+whenever more than one index was opened. A single-index answer keeps its own
 scores, so nothing changes for a single-index setup.
 
 The CLI does the same thing by directory: with no `--index` and no `index.yml`,

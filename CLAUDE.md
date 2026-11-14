@@ -43,7 +43,7 @@ qmd vsearch <query>               # Vector similarity search
 qmd query <query>                 # Hybrid search (BM25 + vector, RRF)
 qmd mcp                           # Run MCP server (stdio)
 qmd cleanup                       # Remove cache, orphaned data, vacuum DB
-qmd --version                     # Version, backend and default embed model
+qmd --version                     # Version, build stamp, backend and default model
 ```
 
 ## Collection Management
@@ -118,7 +118,7 @@ qmd multi-get "#abc123, #def456"
 
 ```sh
 # Search & retrieval
--c, --collection <name>  # Restrict search to a collection (matches pwd suffix)
+-c, --collection <name>  # Restrict search to a collection by name
 -n <num>                 # Number of results
 --all                    # Return all matches
 --min-score <num>        # Minimum score threshold
@@ -136,9 +136,9 @@ qmd multi-get "#abc123, #def456"
 ## Development
 
 ```sh
-go build -o qmd ./cmd/qmd   # Build binary
-./qmd --help                   # From repo: script runs go run or qmd
-go test ./...
+go build -tags fts5 -o qmd ./cmd/qmd   # Build binary
+./qmd --help
+go test -tags fts5 ./...
 ```
 
 ## Architecture

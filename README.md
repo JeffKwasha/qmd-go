@@ -2,7 +2,7 @@
 
 An on-device search engine for everything you need to remember. Index your markdown notes, meeting transcripts, documentation, and knowledge bases. Search with keywords or natural language. Ideal for your agentic flows.
 
-QMD combines BM25 full-text search, vector semantic search, and LLM re-ranking—all running locally via node-llama-cpp with GGUF models.
+QMD combines BM25 full-text search and vector semantic search, merged with reciprocal rank fusion. Embeddings come from Ollama or any OpenAI-compatible API, or from a local GGUF model in the GGUF build. All of it runs locally.
 
 **This project is a fork of [tobi/qmd](https://github.com/tobi/qmd)** (Go port, optional GGUF embedding backend).
 
@@ -12,7 +12,7 @@ QMD combines BM25 full-text search, vector semantic search, and LLM re-ranking�
 # Install (requires Go 1.23+)
 go install -tags fts5 github.com/ba0f3/qmd-go
 # Or from repo:
-# git clone https://github.com/ba0f3/qmd-go && cd qmd && go build -tags fts5 -o qmd-go ./cmd/qmd
+# git clone https://github.com/ba0f3/qmd-go && cd qmd-go && go build -tags fts5 -o qmd ./cmd/qmd
 
 # Create collections for your notes, docs, and meeting transcripts
 qmd collection add ~/notes --name notes
@@ -84,7 +84,7 @@ several named indexes over MCP streamable HTTP, so a single process can back eve
 agent on the machine:
 
 ```bash
-qmd mcp --http --addr 127.0.0.1:8422     # config: ~/.config/qmd/CONFIG.yml
+qmd mcp --http --addr 127.0.0.1:8422     # config: <configdir>/CONFIG.yml
 ```
 
 `CONFIG.yml` maps URL paths to named indexes and gates access with bearer keys:
@@ -151,8 +151,8 @@ and the filesystem exposure of the SQLite files themselves.
 **Claude Code** — Install the plugin (recommended):
 
 ```bash
-claude marketplace add tobi/qmd
-claude plugin add qmd@qmd
+claude marketplace add ba0f3/qmd-go
+claude plugin add qmd@qmd-go
 ```
 
 Or configure MCP manually in `~/.claude/settings.json`:
@@ -198,15 +198,15 @@ Query ──┬──► BM25 (FTS5) ──► Ranked list
 | `fts5` | **Use for normal builds.** Enables SQLite FTS5 full-text search. Without it, `qmd search` and related features will not work. |
 | `gguf` | Optional. Enables local GGUF embedding models (no Ollama required). **Preferred: purego (no CGO)** — build the shared library with `make deps-purego` and `make build-purego`, then `make build-gguf`. Fallback: CGO with [go-llama.cpp](https://github.com/go-skynet/go-llama.cpp) via `make deps-gguf` then `make build-gguf`. |
 
-**Examples:** `make build` (outputs `qmd-go`) or `go build -tags fts5 -o qmd-go ./cmd/qmd`. For GGUF embeddings: `make build-gguf`.
+**Examples:** `make build` (outputs `qmd`) or `go build -tags fts5 -o qmd ./cmd/qmd`. For GGUF embeddings: `make build-gguf`.
 
 ## Installation
 
 **From source (recommended)**
 
 ```sh
-git clone https://github.com/tobi/qmd
-cd qmd
+git clone https://github.com/ba0f3/qmd-go
+cd qmd-go
 make build
 make install
 # Installs to /usr/local/bin/qmd; ensure /usr/local/bin is in your PATH
@@ -229,11 +229,12 @@ go install -tags fts5 github.com/ba0f3/qmd-go@latest
 ### Development
 
 ```sh
-git clone https://github.com/tobi/qmd
-cd qmd
-./qmd --help          # Runs via go run
-make build && ./qmd-go status
-go test ./...
+git clone https://github.com/ba0f3/qmd-go
+cd qmd-go
+make build
+./qmd --help
+./qmd status
+go test -tags fts5 ./...
 ```
 
 ### Testing the GGUF build
@@ -367,7 +368,7 @@ qmd query "user authentication"
 --min-score <num>  # Minimum score threshold (default: 0)
 --full             # Show full document content
 --line-numbers     # Add line numbers to output
---index <name>     # Use named index (default: index)
+--index <name>     # Use named index (default: index.yml; reads cover every index without it)
 
 # Output formats (for search and multi-get)
 --files            # Output: docid,score,filepath,context
@@ -500,8 +501,11 @@ To build with GGUF support, qmd supports two methods. **Purego (no CGO) is recom
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `XDG_CACHE_HOME` | `~/.cache` | Cache directory (index SQLite) |
-| `INDEX_PATH` | (derived) | Override index DB path |
+| `QMD_CONFIG_DIR` | `~/.config/qmd` | Directory holding `<index>.yml` and `CONFIG.yml` |
+| `QMD_DB_DIR` | (derived) | Directory for `<name>.sqlite` when the index file names no `db_path` |
+| `QMD_SERVER_CONFIG` | `<configdir>/CONFIG.yml` | Server config path, when `--server-config` is not given |
+| `XDG_CACHE_HOME` | `~/.cache` | Fallback cache directory for index SQLite files |
+| `INDEX_PATH` | (derived) | Legacy override for a single index DB path |
 | `OLLAMA_HOST` | `http://localhost:11434/v1` | Ollama API base for embed (API backend only) |
 | `QMD_EMBED_MODEL` | API: `nomic-embed-text`; GGUF build: EmbeddingGemma 300M (HF) | Seed for a new index; `embed_model` in the index file wins |
 | `QMD_EMBED_BACKEND` | GGUF build: `gguf`; API build: (none) | `gguf` = use local GGUF; `api` = use Ollama/OpenAI (e.g. when using gguf binary but want API) |

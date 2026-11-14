@@ -14,9 +14,9 @@ var CurrentIndexName = "index"
 
 // ServerConfigName is the file in the config dir holding mounts and auth. It is
 // not an index config, so index discovery skips it. The uppercase name is what
-// puts it above the indexes in a listing: `C` is below every lowercase letter
-// both in byte order and at the primary collation level, while `_` is ignored
-// by collation and lands after the letters.
+// puts it above the indexes in a byte-ordered listing: `C` is below every
+// lowercase letter. A locale-aware sort ignores case and compares it as `c`, so
+// there it lands among the early names rather than first.
 const ServerConfigName = "CONFIG.yml"
 
 // legacyServerConfigName is the name this file had before it was CONFIG.yml. A
