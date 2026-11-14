@@ -11,14 +11,15 @@ import (
 
 // SearchOutputRow is one row for search output (all formats).
 type SearchOutputRow struct {
-	Index    string
-	Docid    string
-	Filepath string
-	Title    string
-	Body     string
-	Score    float64
-	Context  string
-	Full     bool
+	Index     string
+	StartLine int
+	Docid     string
+	Filepath  string
+	Title     string
+	Body      string
+	Score     float64
+	Context   string
+	Full      bool
 }
 
 func docid(hash string) string {
@@ -50,7 +51,7 @@ func WriteSearchOutput(rows []SearchOutputRow, format string, full bool, lineNum
 			rows[i].Full = true
 		}
 		if lineNumbers {
-			rows[i].Body = addLineNumbers(rows[i].Body, 1)
+			rows[i].Body = addLineNumbers(rows[i].Body, rows[i].StartLine)
 		}
 	}
 	switch format {

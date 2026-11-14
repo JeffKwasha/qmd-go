@@ -75,3 +75,19 @@ func TestReservedIndexNames(t *testing.T) {
 		t.Errorf("an index named server was refused: %v", err)
 	}
 }
+
+func TestSnippetCenteringParses(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("QMD_CONFIG_DIR", dir)
+	yml := "snippet_centering: true\ncollections: {}\n"
+	if err := os.WriteFile(filepath.Join(dir, "index.yml"), []byte(yml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfigFor("index")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.SnippetCentering {
+		t.Error("snippet_centering did not survive the load")
+	}
+}

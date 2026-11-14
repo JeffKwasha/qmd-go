@@ -66,6 +66,12 @@ type indexSource struct {
 
 // fusedHit is one document as it appears in a merged answer.
 type fusedHit struct {
+	// Anchor is where a snippet should start: the matched chunk's offset, or
+	// the first occurrence of the longest query term. Centered is the index's
+	// snippet_centering setting; both zero mean "show the head".
+	Anchor   int
+	Centered bool
+
 	Index       string
 	Collection  string
 	Filepath    string
@@ -220,7 +226,7 @@ func contextFor(cfg *config.Config, collection, displayPath string) string {
 	return config.FindContextForPath(cfg, collection, path)
 }
 
-func ftsHit(src indexSource, r store.SearchResult) fusedHit {
+func ftsHit(src indexSource, r store.SearchResult, query string) fusedHit {
 	return fusedHit{
 		Index:       src.Name,
 		Collection:  r.CollectionName,
@@ -231,10 +237,12 @@ func ftsHit(src indexSource, r store.SearchResult) fusedHit {
 		Hash:        r.Hash,
 		Context:     contextFor(src.Cfg, r.CollectionName, r.DisplayPath),
 		Score:       r.Score,
+		Centered:    src.Cfg != nil && src.Cfg.SnippetCentering,
+		Anchor:      anchorFor(r.Body, query, 0),
 	}
 }
 
-func vecHit(src indexSource, r store.VecSearchResult) fusedHit {
+func vecHit(src indexSource, r store.VecSearchResult, query string) fusedHit {
 	collection := ""
 	if i := strings.Index(r.DisplayPath, "/"); i >= 0 {
 		collection = r.DisplayPath[:i]
@@ -249,6 +257,8 @@ func vecHit(src indexSource, r store.VecSearchResult) fusedHit {
 		Hash:        r.Hash,
 		Context:     contextFor(src.Cfg, collection, r.DisplayPath),
 		Score:       r.Score,
+		Centered:    src.Cfg != nil && src.Cfg.SnippetCentering,
+		Anchor:      anchorFor(r.Body, query, r.Pos),
 	}
 }
 
@@ -267,7 +277,7 @@ func runFTS(sources []indexSource, query string, limit int, collection string, m
 			if r.Score < minScore {
 				continue
 			}
-			list = append(list, ftsHit(src, r))
+			list = append(list, ftsHit(src, r, query))
 		}
 		lists = append(lists, list)
 	}
@@ -321,7 +331,7 @@ func runVectors(sources []indexSource, query string, limit int, minScore float64
 				continue
 			}
 			seen[r.Filepath] = true
-			list = append(list, vecHit(src, r))
+			list = append(list, vecHit(src, r, query))
 		}
 		lists = append(lists, list)
 	}
@@ -380,22 +390,28 @@ func runHybrid(sources []indexSource, query string, limit int, collection string
 // name, which only makes sense when more than one index answered.
 func rowFromHit(h fusedHit, full, label bool) SearchOutputRow {
 	body := h.Body
+	startLine := 0
 	if !full && len(body) > 500 {
-		body = body[:500] + "..."
+		if h.Centered && h.Anchor > 0 {
+			body, startLine = centeredSnippet(body, h.Anchor, 500)
+		} else {
+			body = body[:500] + "..."
+		}
 	}
 	index := ""
 	if label {
 		index = h.Index
 	}
 	return SearchOutputRow{
-		Docid:    docid(h.Hash),
-		Filepath: h.Filepath,
-		Title:    h.Title,
-		Body:     body,
-		Score:    h.Score,
-		Context:  h.Context,
-		Full:     full,
-		Index:    index,
+		Docid:     docid(h.Hash),
+		Filepath:  h.Filepath,
+		Title:     h.Title,
+		Body:      body,
+		Score:     h.Score,
+		Context:   h.Context,
+		Full:      full,
+		Index:     index,
+		StartLine: startLine,
 	}
 }
 

@@ -605,3 +605,56 @@ func TestResolveSourcesSkipsUnbuiltButKeepsBuilt(t *testing.T) {
 	}
 	closeSources(sources)
 }
+
+func TestRunVectorsAnchorsCenteredSnippets(t *testing.T) {
+	fakeEmbedBackend(t)
+	dir := t.TempDir()
+	t.Setenv("QMD_CONFIG_DIR", dir)
+	db := filepath.Join(dir, "v.sqlite")
+	yml := "db_path: " + db + "\nembed_model: model\nsnippet_centering: true\ncollections: {}\n"
+	if err := os.WriteFile(filepath.Join(dir, "v.yml"), []byte(yml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	body := strings.Repeat("filler line\n", 1000) + "the needle is here\n"
+	pos := strings.Index(body, "needle")
+	st, err := store.NewStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	now := time.Now()
+	hash := store.HashContent("doc")
+	for _, step := range []func() error{
+		func() error { return st.InsertContent(hash, body, now) },
+		func() error { return st.InsertDocument("c", "doc.md", "doc", hash, now, now) },
+		func() error { return st.EnsureEmbeddingBlobTable() },
+		func() error { return st.InsertEmbedding(hash, 0, pos, []float32{1, 0}, "model", now) },
+	} {
+		if err := step(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	sources, err := openSources([]string{"v"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeSources(sources)
+	hits, err := runVectors(sources, "query", 5, 0, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 1 {
+		t.Fatalf("got %d hits", len(hits))
+	}
+	if !hits[0].Centered || hits[0].Anchor != pos {
+		t.Fatalf("hit anchor = %d centered = %v, want %d and true", hits[0].Anchor, hits[0].Centered, pos)
+	}
+	row := rowFromHit(hits[0], false, false)
+	if !strings.Contains(row.Body, "needle") {
+		t.Errorf("snippet missed the matched passage:\n%s", row.Body)
+	}
+	if row.StartLine < 900 {
+		t.Errorf("start line = %d, want the anchor's line", row.StartLine)
+	}
+}

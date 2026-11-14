@@ -117,6 +117,21 @@ query with the model the mounted index records. The CLI reads the file per run;
 the HTTP server loads it at startup, so a changed `embed_model` reaches it on
 the next restart.
 
+### Snippets
+
+By default a result snippet is the top of the file. Per index, the snippet can be
+centred on the passage that matched:
+
+```yaml
+snippet_centering: true
+```
+
+A vector hit is centred on the chunk whose embedding matched (`content_vectors.pos`
+holds its offset); a full-text hit on the first occurrence of the longest query
+term. The line numbers in the excerpt are the document's real lines, so a client
+can follow up with `qmd get 'file:501'`. The stored document and `--full` output are
+unchanged: only the excerpt moves.
+
 A reindex unit needs the config directory and two lines:
 
 ```ini

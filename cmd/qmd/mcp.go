@@ -207,7 +207,7 @@ func hitsResult(hits []fusedHit, query string, label bool) (*mcp.CallToolResult,
 		b.WriteString("\n")
 		m := map[string]any{
 			"docid": "#" + docid(h.Hash), "file": h.DisplayPath, "title": h.Title,
-			"score": roundScore(h.Score), "context": h.Context, "snippet": snippet(h.Body, query, 300),
+			"score": roundScore(h.Score), "context": h.Context, "snippet": snippet(h.Body, query, 300, h.Anchor, h.Centered),
 		}
 		if label {
 			m["index"] = h.Index
@@ -462,12 +462,18 @@ func statusTool(sources []indexSource) func(context.Context, *mcp.CallToolReques
 	}
 }
 
-func snippet(body, query string, maxLen int) string {
+func snippet(body, query string, maxLen, anchor int, centered bool) string {
 	if body == "" {
 		return ""
 	}
 	if len(body) <= maxLen {
 		return addLineNumbers(body, 1)
+	}
+	if centered && anchor > 0 {
+		text, startLine := centeredSnippet(body, anchor, maxLen)
+		if text != "" {
+			return addLineNumbers(text, startLine)
+		}
 	}
 	lines := strings.Split(body, "\n")
 	var out []string

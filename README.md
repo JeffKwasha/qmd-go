@@ -436,7 +436,7 @@ path. The server and the CLI use the same resolution.
 - **content** – Full document text (keyed by hash)
 - **documents_fts** – FTS5 full-text index
 - **content_vectors** / **embedding_blobs** – Chunk embeddings for vector search
-- Config (collections, context) – YAML in `~/.config/qmd/index.yml` (or per `--index`)
+- Config (collections, context, `db_path`, `embed_model`, `snippet_centering`) – YAML in `<index>.yml` (or per `--index`)
 
 ## Embedding backends
 

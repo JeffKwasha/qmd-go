@@ -125,6 +125,8 @@ type VecSearchResult struct {
 	Body        string
 	Score       float64
 	Hash        string
+	// Pos is the character offset of the chunk that matched, for snippets.
+	Pos int
 }
 
 // SearchVectorsBrute does brute-force cosine similarity search over embedding_blobs.
@@ -136,7 +138,7 @@ func (s *Store) SearchVectorsBrute(queryEmbedding []float32, limit int, collecti
 		SELECT eb.hash_seq, eb.embedding,
 			'qmd://' || d.collection || '/' || d.path AS filepath,
 			d.collection || '/' || d.path AS display_path,
-			d.title, content.doc AS body, d.hash
+			d.title, content.doc AS body, d.hash, cv.pos
 		FROM embedding_blobs eb
 		JOIN content_vectors cv ON cv.hash || '_' || cv.seq = eb.hash_seq
 		JOIN documents d ON d.hash = cv.hash AND d.active = 1
@@ -160,11 +162,12 @@ func (s *Store) SearchVectorsBrute(queryEmbedding []float32, limit int, collecti
 		Title       string
 		Body        string
 		Hash        string
+		Pos         int
 	}
 	var rowsList []row
 	for rows.Next() {
 		var r row
-		if err := rows.Scan(&r.HashSeq, &r.Embedding, &r.Filepath, &r.DisplayPath, &r.Title, &r.Body, &r.Hash); err != nil {
+		if err := rows.Scan(&r.HashSeq, &r.Embedding, &r.Filepath, &r.DisplayPath, &r.Title, &r.Body, &r.Hash, &r.Pos); err != nil {
 			return nil, err
 		}
 		rowsList = append(rowsList, r)
@@ -205,6 +208,7 @@ func (s *Store) SearchVectorsBrute(queryEmbedding []float32, limit int, collecti
 			Body:        s.r.Body,
 			Score:       s.score,
 			Hash:        s.r.Hash,
+			Pos:         s.r.Pos,
 		})
 	}
 	return out, nil
